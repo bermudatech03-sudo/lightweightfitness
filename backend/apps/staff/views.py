@@ -20,7 +20,7 @@ from .serializers import (
 
 # ─── Salary → Finance helper ─────────────────────────────────────────────────
 
-def _record_expense(staff, amount, month):
+def _record_expense(staff, amount, month, paid_date):
     from apps.finances.models import Expenditure
     month_name = calendar.month_name[month.month]
 
@@ -38,7 +38,7 @@ def _record_expense(staff, amount, month):
         category="salary",
         description=f"Salary — {staff.name} ({month_name} {month.year}) [{att_pct}% attendance]",
         amount=amount,
-        date=month,  # date = 1st of the payment month so Finance summary filters correctly
+        date=paid_date,  # date = actual payment date so Finance reflects the month salary was credited
         vendor=staff.name,
         notes=(
             f"Role: {staff.role} | Shift: {staff.shift} | Month: {month_name} {month.year} "
@@ -570,7 +570,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         p.save()
         # ────────────────────────────────────────────────────────────────────
 
-        _record_expense(p.staff, p.amount, p.month)
+        _record_expense(p.staff, p.amount, p.month, p.paid_date)
         return Response(PaymentSerializer(p).data)
 
     @action(detail=True, methods=["post"])
