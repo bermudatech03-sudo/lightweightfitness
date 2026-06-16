@@ -29,7 +29,9 @@ def _get_executor():
 def notify_members_on_new_plan(sender, instance, created, **kwargs):
     """
     Fires when a new MembershipPlan is saved for the first time.
-    Queues a WhatsApp notification to every active member.
+    Collects recipients on the main thread then dispatches a single background
+    task that sends 1 message every 2 seconds (30/min) to stay within Meta's
+    safe rate limits and avoid spam flags.
     Skips if NOTIFY_NEW_PLAN is disabled.
     """
     if not created:
@@ -39,8 +41,12 @@ def notify_members_on_new_plan(sender, instance, created, **kwargs):
         return
     from apps.members.models import Member
     from apps.enquiries.models import Enquiry
-    template = TEMPLATES["new_plan"]
+
+    template      = TEMPLATES["new_plan"]
     template_name = TRIGGER_TEMPLATES.get("new_plan", "")
+    plan_name     = instance.name
+    duration      = instance.duration_days
+    price         = instance.price
 
     recipients = []
     for member in Member.objects.filter(status="active").only("name", "phone"):
@@ -48,33 +54,61 @@ def notify_members_on_new_plan(sender, instance, created, **kwargs):
     for enquiry in Enquiry.objects.filter(status__in=("new", "followup")).only("name", "phone"):
         recipients.append((enquiry.name, enquiry.phone))
 
-    for name, raw_phone in recipients:
-        phone = str(raw_phone or "").strip().replace(" ", "").replace("-", "")
-        if not phone:
-            continue
-        if not phone.startswith("91"):
-            phone = f"91{phone}"
-        body = template.format(
-            name=name,
-            plan_name=instance.name,
-            duration=instance.duration_days,
-            price=instance.price,
-        )
-        Notification.objects.create(
-            recipient_name=name,
-            recipient_phone=phone,
-            channel="whatsapp",
-            trigger_type="new_plan",
-            message=body,
-            template_name=template_name,
-            template_params=[name, instance.name, str(instance.duration_days), str(instance.price)],
-            status="pending",
-        )
+    def _bulk_send():
+        from django.db import connection
+        connection.close()
+        for name, raw_phone in recipients:
+            phone = str(raw_phone or "").strip().replace(" ", "").replace("-", "")
+            if not phone:
+                continue
+            if not phone.startswith("91"):
+                phone = f"91{phone}"
+
+            body = template.format(name=name, plan_name=plan_name, duration=duration, price=price)
+            params = [name, plan_name, str(duration), str(price)]
+
+            notif = Notification.objects.create(
+                recipient_name=name,
+                recipient_phone=phone,
+                channel="whatsapp",
+                trigger_type="new_plan",
+                message=body,
+                template_name=template_name,
+                template_params=params,
+                status="pending",
+            )
+            # dispatch_whatsapp_on_create skips new_plan_launch (in _BULK_TEMPLATES)
+            # so we send directly here after the 2-second rate-limit sleep.
+            result = send_whatsapp_template(
+                to=phone,
+                template_name=template_name,
+                language_code="en",
+                body_params=params,
+            )
+            if result.get("success"):
+                Notification.objects.filter(pk=notif.pk).update(
+                    status="sent",
+                    sent_at=timezone.now(),
+                )
+                logger.info(f"Bulk new_plan sent to {phone}")
+            else:
+                Notification.objects.filter(pk=notif.pk).update(
+                    status="failed",
+                    error_log=result.get("error", "Unknown error"),
+                )
+                logger.error(f"Bulk new_plan failed for {phone}: {result.get('error')}")
+
+            time.sleep(2)  # 1 message per 2 seconds = 30 per minute
+
+    _get_executor().submit(_bulk_send)
 
 
-# Bill templates require a document header (PDF media_id) that the signal cannot
-# provide — send_bill_on_whatsapp() dispatches these directly and updates status itself.
+# Bill templates — require a PDF document header; handled directly by send_bill_on_whatsapp().
 _BILL_TEMPLATES = {"membership_bill", "pt_bill"}
+
+# Bulk templates — rate-limited dispatch handled in their own background task;
+# the generic signal must skip them to avoid double-sending.
+_BULK_TEMPLATES = {"new_plan_launch"}
 
 
 @receiver(post_save, sender=Notification)
@@ -82,15 +116,16 @@ def dispatch_whatsapp_on_create(sender, instance, created, **kwargs):
     """
     Triggers on every new Notification row (status=pending).
     Uses queryset.update() to avoid re-triggering the signal on status update.
-    Bill-type templates (membership_bill, pt_bill) are skipped here because
-    they require a PDF document header handled directly by send_bill_on_whatsapp().
+    Bill templates and bulk templates are skipped here — they manage their own dispatch.
     """
     if not created:
         return
     if instance.status != "pending":
         return
     if instance.template_name in _BILL_TEMPLATES:
-        # Delivery is handled directly by send_bill_on_whatsapp(); skip here.
+        return
+    if instance.template_name in _BULK_TEMPLATES:
+        # Rate-limited dispatch is handled by the bulk sender (_bulk_send above).
         return
     if not instance.recipient_phone:
         logger.warning(f"Notification {instance.pk} skipped — no phone number.")

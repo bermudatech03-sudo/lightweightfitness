@@ -206,8 +206,10 @@ def send_weekly_pending_payment_reminders():
     """
     Runs every Sunday at 10:00 AM.
     - Sends each active/paused member with a balance due a reminder to pay.
+    - Rate-limited to 1 message per 2 seconds (30/min) to stay within Meta's safe limits.
     - Sends admin a summary list of all pending-balance members.
     """
+    import time
     from apps.notifications.utils import send_pending_payment_reminder, send_pending_payment_admin_summary
     from apps.members.models import Member
 
@@ -218,6 +220,7 @@ def send_weekly_pending_payment_reminders():
 
     for member in members_with_balance:
         send_pending_payment_reminder(member)
+        time.sleep(2)  # 1 message per 2 seconds = 30 per minute
 
     if members_with_balance:
         send_pending_payment_admin_summary(members_with_balance)
