@@ -211,6 +211,7 @@ def send_weekly_pending_payment_reminders():
     - Sends admin a summary of all pending-balance members regardless of cap.
     """
     import time
+    from django.db.models import Sum, F
     from apps.notifications.utils import (
         send_pending_payment_reminder,
         send_pending_payment_admin_summary,
@@ -218,10 +219,20 @@ def send_weekly_pending_payment_reminders():
     )
     from apps.members.models import Member
 
-    members_with_balance = [
-        m for m in Member.objects.filter(status__in=["active", "paused"])
-        if m.balance_due() > 0
-    ]
+    # Filter for a balance at the DB level instead of loading every active/paused
+    # member into Python and calling balance_due() (2 aggregate queries each) on
+    # all of them just to find the few who actually owe money.
+    members_with_balance = list(
+        Member.objects.filter(status__in=["active", "paused"])
+        .annotate(_ann_total_paid=Sum("payments__amount_paid"), _ann_total_due=Sum("payments__total_with_gst"))
+        .filter(_ann_total_due__gt=F("_ann_total_paid"))
+    )
+    # Pre-seed the memoized total_paid()/total_due() cache (see Member model) from
+    # the annotation so send_pending_payment_reminder/_admin_summary below — which
+    # call member.balance_due() again to build the message — don't re-query.
+    for _m in members_with_balance:
+        _m._total_paid_cache = _m._ann_total_paid or 0
+        _m._total_due_cache  = _m._ann_total_due or 0
 
     for member in members_with_balance:
         if bulk_slots_remaining() <= 0:

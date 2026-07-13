@@ -83,15 +83,39 @@ class MemberSerializer(serializers.ModelSerializer):
         model  = Member
         fields = "__all__"
 
+    def _payments(self, obj):
+        """
+        Uses the `prefetched_payments` list (see MemberViewSet.get_queryset, ordered
+        -created_at) when available so total_paid/balance_due/latest_discount_amount
+        share one query instead of each hitting the DB separately — falls back to a
+        single direct query (cached on the instance) otherwise.
+        """
+        if not hasattr(obj, "_cached_payments"):
+            prefetched = getattr(obj, "prefetched_payments", None)
+            obj._cached_payments = (
+                prefetched if prefetched is not None
+                else list(obj.payments.order_by("-created_at"))
+            )
+        return obj._cached_payments
+
     def get_days_until_expiry(self, obj): return obj.days_until_expiry()
-    def get_total_paid(self, obj):        return float(obj.total_paid())
-    def get_balance_due(self, obj):       return float(obj.balance_due())
+
+    def get_total_paid(self, obj):
+        total = sum((p.amount_paid for p in self._payments(obj)), Decimal("0"))
+        return float(total)
+
+    def get_balance_due(self, obj):
+        payments   = self._payments(obj)
+        total_due  = sum((p.total_with_gst for p in payments), Decimal("0"))
+        total_paid = sum((p.amount_paid    for p in payments), Decimal("0"))
+        return float(total_due - total_paid)
+
     def get_member_id_display(self, obj): return obj.display_id()
     def get_plan_allows_trainer(self, obj):
         return obj.plan_type in ("standard", "premium") and obj.personal_trainer
     def get_latest_discount_amount(self, obj):
-        p = obj.payments.order_by("-created_at").values_list("discount_amount", flat=True).first()
-        return float(p) if p is not None else 0.0
+        payments = self._payments(obj)
+        return float(payments[0].discount_amount) if payments else 0.0
 
 
 class MemberAttendanceSerializer(serializers.ModelSerializer):
@@ -227,12 +251,22 @@ class TrainerAssignmentSerializer(serializers.ModelSerializer):
         payable = (fee * pct / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
         return float(payable)
 
+    def _latest_payment(self, obj):
+        """
+        Uses the `prefetched_payments` list (see MemberTrainerAssignmentViewSet.get_queryset)
+        when available to avoid a duplicate query — falls back to a direct query otherwise.
+        """
+        prefetched = getattr(obj.member, "prefetched_payments", None)
+        if prefetched is not None:
+            return prefetched[0] if prefetched else None
+        return obj.member.payments.order_by("-created_at").first()
+
     def get_member_amount_paid(self, obj):
-        payment = obj.member.payments.order_by("-created_at").first()
+        payment = self._latest_payment(obj)
         return float(payment.amount_paid) if payment else 0
 
     def get_member_plan_total(self, obj):
-        payment = obj.member.payments.order_by("-created_at").first()
+        payment = self._latest_payment(obj)
         return float(payment.total_with_gst) if payment else 0
 
     def get_pt_days_remaining(self, obj):
@@ -309,29 +343,38 @@ class TrainerAssignmentSerializer(serializers.ModelSerializer):
             return f"PT is active until plan expiry ({obj.member.renewal_date}) — extend membership to unlock renewal"
         return None
 
+    def _pt_renewals(self, obj):
+        """
+        obj.pt_renewals.all() uses the prefetch_related("pt_renewals") cache from
+        MemberTrainerAssignmentViewSet.get_queryset when present (one query for all
+        rows instead of one query per row per method below), and still respects
+        PTRenewal.Meta.ordering (-created_at) either way — same semantics as the
+        previous .filter().order_by("-created_at").first() calls, just computed
+        in Python instead of 5 separate DB round-trips per row.
+        """
+        return list(obj.pt_renewals.all())
+
+    def _latest_pending_pt_renewal(self, obj):
+        pending = [r for r in self._pt_renewals(obj) if r.status in ("partial", "pending")]
+        return pending[0] if pending else None
+
     def get_pending_pt_renewal_trainer_amount(self, obj):
         """Sum of trainer_payable_amount for all unpaid PTRenewal records on this assignment."""
-        from django.db.models import Sum
-        result = obj.pt_renewals.filter(trainer_paid=False).aggregate(
-            t=Sum("trainer_payable_amount")
-        )["t"]
-        return float(result or 0)
+        total = sum((r.trainer_payable_amount for r in self._pt_renewals(obj) if not r.trainer_paid), Decimal("0"))
+        return float(total)
 
     def get_pt_renewal_member_paid_amount(self, obj):
         """Sum of amount_paid collected from member for renewals not yet paid out to trainer."""
-        from django.db.models import Sum
-        result = obj.pt_renewals.filter(trainer_paid=False).aggregate(
-            t=Sum("amount_paid")
-        )["t"]
-        return float(result or 0)
+        total = sum((r.amount_paid for r in self._pt_renewals(obj) if not r.trainer_paid), Decimal("0"))
+        return float(total)
 
     def get_has_paid_pt_renewals(self, obj):
         """True when at least one PTRenewal has been paid out to the trainer."""
-        return obj.pt_renewals.filter(trainer_paid=True).exists()
+        return any(r.trainer_paid for r in self._pt_renewals(obj))
 
     def get_pending_pt_balance(self, obj):
         """Balance remaining on the latest partial/pending PTRenewal."""
-        latest = obj.pt_renewals.filter(status__in=["partial", "pending"]).order_by("-created_at").first()
+        latest = self._latest_pending_pt_renewal(obj)
         if not latest:
             return 0.0
         bal = latest.total_amount - latest.amount_paid
@@ -339,7 +382,7 @@ class TrainerAssignmentSerializer(serializers.ModelSerializer):
 
     def get_pending_pt_balance_invoice(self, obj):
         """Invoice number of the latest partial/pending PTRenewal."""
-        latest = obj.pt_renewals.filter(status__in=["partial", "pending"]).order_by("-created_at").first()
+        latest = self._latest_pending_pt_renewal(obj)
         return latest.invoice_number if latest else None
 
     def validate(self, data):

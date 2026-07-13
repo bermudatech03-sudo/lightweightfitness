@@ -1,6 +1,8 @@
 from datetime import timedelta
 from rest_framework import viewsets, status
+from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.db.models import Count, Q
 from django.utils import timezone
 from .models import Enquiry, EnquiryFollowup
 from .serializers import EnquirySerializer
@@ -44,6 +46,8 @@ def _send_welcome(enquiry):
 class EnquiryViewSet(viewsets.ModelViewSet):
     queryset = Enquiry.objects.prefetch_related("followups").all()
     serializer_class = EnquirySerializer
+    filterset_fields = ["status"]
+    search_fields = ["name", "phone"]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -55,3 +59,15 @@ class EnquiryViewSet(viewsets.ModelViewSet):
         except Exception:
             pass
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def counts(self, request):
+        """Status counts across ALL enquiries (not just the current page) for summary badges."""
+        agg = Enquiry.objects.aggregate(
+            total=Count("id"),
+            new=Count("id", filter=Q(status="new")),
+            followup=Count("id", filter=Q(status="followup")),
+            converted=Count("id", filter=Q(status="converted")),
+            lost=Count("id", filter=Q(status="lost")),
+        )
+        return Response(agg)

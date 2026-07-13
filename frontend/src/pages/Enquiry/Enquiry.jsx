@@ -83,6 +83,9 @@ function EnquiryModal({ enquiry, onClose, onSave }) {
 
 export default function Enquiry() {
   const [enquiries, setEnquiries] = useState([]);
+  const [count, setCount] = useState(0);
+  const [statusCounts, setStatusCounts] = useState({});
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null); // null | "new" | enquiry obj
   const [confirmState, setConfirmState] = useState(null);
@@ -96,13 +99,27 @@ export default function Enquiry() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get("/enquiries/");
+      const params = { page };
+      if (filterStatus) params.status = filterStatus;
+      if (search) params.search = search;
+      const res = await api.get("/enquiries/", { params });
       setEnquiries(Array.isArray(res.data) ? res.data : res.data?.results ?? []);
+      setCount(res.data?.count ?? 0);
     } catch { toast.error("Failed to load enquiries."); }
     finally { setLoading(false); }
+  }, [page, filterStatus, search]);
+
+  // Status counts are across ALL enquiries (independent of page/search/filter),
+  // so they're only refetched on mount and after a mutation, not on every keystroke.
+  const loadCounts = useCallback(async () => {
+    try {
+      const res = await api.get("/enquiries/counts/");
+      setStatusCounts(res.data || {});
+    } catch { /* non-fatal — badges just keep their last known values */ }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadCounts(); }, [loadCounts]);
 
   const handleDelete = (enquiry) => {
     setConfirmState({
@@ -116,24 +133,15 @@ export default function Enquiry() {
           await api.delete(`/enquiries/${enquiry.id}/`);
           toast.success("Enquiry deleted.");
           load();
+          loadCounts();
         } catch { toast.error("Delete failed."); }
       },
       onCancel: () => setConfirmState(null),
     });
   };
 
-  const filtered = enquiries.filter(e => {
-    const matchStatus = !filterStatus || e.status === filterStatus;
-    const q = search.toLowerCase();
-    const matchSearch = !q || e.name.toLowerCase().includes(q) || e.phone.includes(q);
-    return matchStatus && matchSearch;
-  });
-
-  // Summary counts
-  const counts = enquiries.reduce((acc, e) => {
-    acc[e.status] = (acc[e.status] || 0) + 1;
-    return acc;
-  }, {});
+  // enquiries is already the server-filtered, server-paginated current page
+  const filtered = enquiries;
 
   return (
     <div className="page">
@@ -147,15 +155,15 @@ export default function Enquiry() {
         <button className="btn btn-primary" onClick={() => setModal("Follow-up")}>+ Add Enquiry</button>
       </div>
 
-      {/* Summary badges */}
+      {/* Summary badges — counts across ALL enquiries, from the server, not just this page */}
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
         {Object.entries(STATUS_LABELS).map(([k, v]) => (
           <span key={k} className={`badge ${v.cls}`} style={{ padding: "5px 14px", fontSize: 13 }}>
-            {v.label}: {counts[k] || 0}
+            {v.label}: {statusCounts[k] || 0}
           </span>
         ))}
         <span style={{ fontSize: 13, color: "var(--text-muted)", alignSelf: "center", marginLeft: 6 }}>
-          Total: {enquiries.length}
+          Total: {statusCounts.total ?? count}
         </span>
       </div>
 
@@ -164,17 +172,17 @@ export default function Enquiry() {
         <input
           className="form-input" style={{ width: 220 }}
           placeholder="Search name / phone…"
-          value={search} onChange={e => setSearch(e.target.value)}
+          value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
         />
         <select className="form-input" style={{ width: 180 }}
-          value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
+          value={filterStatus} onChange={e => { setFilterStatus(e.target.value); setPage(1); }}>
           <option value="">All Statuses</option>
           {Object.entries(STATUS_LABELS).map(([k, v]) => (
             <option key={k} value={k}>{v.label}</option>
           ))}
         </select>
         {(filterStatus || search) && (
-          <button className="btn btn-ghost" onClick={() => { setFilterStatus(""); setSearch(""); }}>Clear</button>
+          <button className="btn btn-ghost" onClick={() => { setFilterStatus(""); setSearch(""); setPage(1); }}>Clear</button>
         )}
       </div>
 
@@ -284,11 +292,24 @@ export default function Enquiry() {
         </div>
       )}
 
+      {!loading && (enquiries.length > 0 || page > 1) && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "12px 16px", borderTop: "1px solid var(--border)",
+        }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{count} total</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn btn-sm btn-secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>← Prev</button>
+            <button className="btn btn-sm btn-secondary" disabled={enquiries.length < 20} onClick={() => setPage(p => p + 1)}>Next →</button>
+          </div>
+        </div>
+      )}
+
       {modal && (
         <EnquiryModal
           enquiry={modal === "Follow-up" ? null : modal}
           onClose={() => setModal(null)}
-          onSave={() => { setModal(null); load(); }}
+          onSave={() => { setModal(null); load(); loadCounts(); }}
         />
       )}
     </div>

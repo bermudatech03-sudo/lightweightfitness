@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, Prefetch, Count
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 
@@ -187,7 +187,7 @@ class MembershipPlanViewSet(viewsets.ModelViewSet):
 
 
 class MemberViewSet(viewsets.ModelViewSet):
-    queryset         = Member.objects.select_related("plan").all()
+    queryset         = Member.objects.select_related("plan", "diet").all()
     serializer_class = MemberSerializer
     search_fields    = ["name","phone","email"]
     ordering_fields  = ["name","join_date","renewal_date","status","personal_trainer"]
@@ -196,7 +196,18 @@ class MemberViewSet(viewsets.ModelViewSet):
         # Auto-expire members whose renewal date has passed
         _auto_expire_members()
 
-        qs     = Member.objects.select_related("plan").all()
+        qs     = (
+            Member.objects
+            .select_related("plan", "diet")
+            .prefetch_related(
+                Prefetch(
+                    "payments",
+                    queryset=MemberPayment.objects.order_by("-created_at"),
+                    to_attr="prefetched_payments",
+                ),
+            )
+            .all()
+        )
         params = self.request.query_params
 
         # status filter
@@ -556,7 +567,13 @@ class MemberViewSet(viewsets.ModelViewSet):
     def expiring_soon(self, request):
         days   = int(request.query_params.get("days", 7))
         cutoff = timezone.localdate() + timedelta(days=days)
-        qs = Member.objects.filter(
+        qs = Member.objects.select_related("plan", "diet").prefetch_related(
+            Prefetch(
+                "payments",
+                queryset=MemberPayment.objects.order_by("-created_at"),
+                to_attr="prefetched_payments",
+            ),
+        ).filter(
             status="active",
             renewal_date__lte=cutoff,
             renewal_date__gte=timezone.localdate()
@@ -567,19 +584,23 @@ class MemberViewSet(viewsets.ModelViewSet):
     def stats(self, request):
         _auto_expire_members()
         today = timezone.localdate()
-        return Response({
-            "total":          Member.objects.count(),
-            "active":         Member.objects.filter(status="active").count(),
-            "expired":        Member.objects.filter(status="expired").count(),
-            "cancelled":      Member.objects.filter(status="cancelled").count(),
-            "expiring_7":     Member.objects.filter(
+        # Single aggregate query with conditional counts instead of 6 separate .count() queries.
+        agg = Member.objects.aggregate(
+            total=Count("id"),
+            active=Count("id", filter=Q(status="active")),
+            expired=Count("id", filter=Q(status="expired")),
+            cancelled=Count("id", filter=Q(status="cancelled")),
+            expiring_7=Count("id", filter=Q(
                 status="active",
-                renewal_date__lte=today+timedelta(days=7),
-                renewal_date__gte=today).count(),
-            "new_this_month": Member.objects.filter(
+                renewal_date__lte=today + timedelta(days=7),
+                renewal_date__gte=today,
+            )),
+            new_this_month=Count("id", filter=Q(
                 join_date__year=today.year,
-                join_date__month=today.month).count(),
-        })
+                join_date__month=today.month,
+            )),
+        )
+        return Response(agg)
 
 
 class MemberPaymentViewSet(viewsets.ModelViewSet):
@@ -787,9 +808,22 @@ class DietViewSet(viewsets.ModelViewSet):
 class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
     queryset         = TrainerAssignment.objects.select_related("member", "trainer", "plan").all()
     serializer_class = TrainerAssignmentSerializer
+    search_fields     = ["member__name", "trainer__name"]
 
     def get_queryset(self):
-        qs     = TrainerAssignment.objects.select_related("member", "trainer", "plan").all()
+        qs = (
+            TrainerAssignment.objects
+            .select_related("member", "trainer", "plan")
+            .prefetch_related(
+                Prefetch(
+                    "member__payments",
+                    queryset=MemberPayment.objects.order_by("-created_at"),
+                    to_attr="prefetched_payments",
+                ),
+                "pt_renewals",
+            )
+            .all()
+        )
         params = self.request.query_params
         if params.get("member"):
             qs = qs.filter(member_id=params["member"])

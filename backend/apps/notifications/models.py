@@ -27,16 +27,16 @@ class Notification(models.Model):
     recipient_name  = models.CharField(max_length=150)
     recipient_phone = models.CharField(max_length=20, blank=True)
     channel         = models.CharField(max_length=10, choices=CHANNEL, default="whatsapp")
-    trigger_type    = models.CharField(max_length=30, choices=TRIGGER, default="manual")
+    trigger_type    = models.CharField(max_length=30, choices=TRIGGER, default="manual", db_index=True)
     message         = models.TextField()
     template_name   = models.CharField(max_length=100, blank=True, default="")
     template_params = models.JSONField(default=list, blank=True)
     language_code   = models.CharField(max_length=10, blank=True, default="en")
-    status          = models.CharField(max_length=10, choices=STATUS, default="pending")
+    status          = models.CharField(max_length=10, choices=STATUS, default="pending", db_index=True)
     sent_at         = models.DateTimeField(null=True, blank=True)
     error_log       = models.TextField(blank=True)
     retry_count     = models.PositiveSmallIntegerField(default=0)
-    created_at      = models.DateTimeField(auto_now_add=True)
+    created_at      = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ["-created_at"]

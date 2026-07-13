@@ -24,7 +24,7 @@ class Member(models.Model):
     phone        = models.CharField(max_length=15, unique=True)
     email        = models.EmailField(blank=True,null = True)
     age          = models.PositiveIntegerField(default=18)
-    dob           = models.DateField(null=True, blank=True)
+    dob           = models.DateField(null=True, blank=True, db_index=True)
     gym_member_id = models.CharField(max_length=50, blank=True)
     gender        = models.CharField(max_length=10, choices=GENDER, blank=True)
     address      = models.TextField(blank=True)
@@ -34,8 +34,8 @@ class Member(models.Model):
     plan_type     = models.CharField(max_length=20, choices=PLANTYPE, default="basic")
     diet         = models.ForeignKey('DietPlan', on_delete=models.SET_NULL, null=True, blank=True)
     join_date    = models.DateField(default=timezone.localdate)
-    renewal_date = models.DateField(null=True, blank=True)
-    status       = models.CharField(max_length=12, choices=STATUS, default="active")
+    renewal_date = models.DateField(null=True, blank=True, db_index=True)
+    status       = models.CharField(max_length=12, choices=STATUS, default="active", db_index=True)
     notes        = models.TextField(blank=True)
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
@@ -55,14 +55,24 @@ class Member(models.Model):
         return None
 
     def total_paid(self):
-        from django.db.models import Sum
-        result = self.payments.aggregate(t=Sum("amount_paid"))["t"]
-        return result or 0
+        """
+        Cached on the instance (see _total_paid_cache) so repeated calls within the
+        same request/job run don't re-query — a caller can also pre-populate
+        _total_paid_cache directly (e.g. from a queryset .annotate()) to skip the
+        query entirely.
+        """
+        if not hasattr(self, "_total_paid_cache"):
+            from django.db.models import Sum
+            result = self.payments.aggregate(t=Sum("amount_paid"))["t"]
+            self._total_paid_cache = result or 0
+        return self._total_paid_cache
 
     def total_due(self):
-        from django.db.models import Sum
-        result = self.payments.aggregate(t=Sum("total_with_gst"))["t"]
-        return result or 0
+        if not hasattr(self, "_total_due_cache"):
+            from django.db.models import Sum
+            result = self.payments.aggregate(t=Sum("total_with_gst"))["t"]
+            self._total_due_cache = result or 0
+        return self._total_due_cache
 
     def balance_due(self):
         return self.total_due() - self.total_paid()
@@ -118,10 +128,10 @@ class MemberPayment(models.Model):
     paid_date      = models.DateField(default=timezone.localdate)
     valid_from     = models.DateField()
     valid_to       = models.DateField()
-    status         = models.CharField(max_length=10, choices=STATUS, default="pending")
+    status         = models.CharField(max_length=10, choices=STATUS, default="pending", db_index=True)
     notes          = models.TextField(blank=True)
     created_at     = models.DateTimeField(auto_now_add=True)
- 
+
     class Meta:
         ordering = ["-paid_date"]
  
@@ -257,7 +267,7 @@ class TrainerAssignment(models.Model):
     member                     = models.ForeignKey(Member, on_delete=models.CASCADE, related_name="trainer_assignments")
     trainer                    = models.ForeignKey('staff.StaffMember', on_delete=models.CASCADE, limit_choices_to={"role": "trainer"}, related_name="member_assignments")
     plan                       = models.ForeignKey(MembershipPlan, on_delete=models.SET_NULL, null=True, blank=True)
-    assigned_at                = models.DateTimeField(auto_now_add=True)
+    assigned_at                = models.DateTimeField(auto_now_add=True, db_index=True)
     startingtime               = models.TimeField()
     endingtime                 = models.TimeField()
     working_days               = models.CharField(max_length=20, default="0,1,2,3,4,5,6")

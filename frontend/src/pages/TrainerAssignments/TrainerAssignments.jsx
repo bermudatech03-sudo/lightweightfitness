@@ -1106,6 +1106,9 @@ export default function TrainerAssignments() {
   const isRenewUpgrade = urlParams.get("renewUpgrade") === "1";
 
   const [assignments, setAssignments]   = useState([]);
+  const [count, setCount]               = useState(0);
+  const [page, setPage]                 = useState(1);
+  const [search, setSearch]             = useState("");
   const [allMembers, setAllMembers]     = useState([]);
   const [trainers, setTrainers]         = useState([]);
   const [plans, setPlans]               = useState([]);
@@ -1124,18 +1127,20 @@ export default function TrainerAssignments() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const params = {};
+      const params = { page };
       if (filterMember)  params.member  = filterMember;
       if (filterTrainer) params.trainer = filterTrainer;
+      if (search)        params.search  = search;
       const res = await api.get("/members/assign-trainer/", { params });
       const raw = res.data;
       setAssignments(Array.isArray(raw) ? raw : raw?.results ?? []);
+      setCount(raw?.count ?? (Array.isArray(raw) ? raw.length : 0));
     } catch {
       toast.error("Failed to load assignments.");
     } finally {
       setLoading(false);
     }
-  }, [filterMember, filterTrainer]);
+  }, [page, filterMember, filterTrainer, search]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1285,22 +1290,27 @@ export default function TrainerAssignments() {
 
       {/* Filters */}
       <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <input
+          className="form-input" style={{ width: 220 }}
+          placeholder="Search member / trainer name…"
+          value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
+        />
         <select className="form-input" style={{ width: 230 }}
-          value={filterMember} onChange={e => setFilterMember(e.target.value)}>
+          value={filterMember} onChange={e => { setFilterMember(e.target.value); setPage(1); }}>
           <option value="">All Members</option>
           {eligibleMembers.map(m => (
             <option key={m.id} value={m.id}>{m.member_id_display} — {m.name}</option>
           ))}
         </select>
         <select className="form-input" style={{ width: 230 }}
-          value={filterTrainer} onChange={e => setFilterTrainer(e.target.value)}>
+          value={filterTrainer} onChange={e => { setFilterTrainer(e.target.value); setPage(1); }}>
           <option value="">All Trainers</option>
           {trainers.map(t => (
             <option key={t.id} value={t.id}>S{String(t.id).padStart(4, "0")} — {t.name}</option>
           ))}
         </select>
-        {(filterMember || filterTrainer) && (
-          <button className="btn btn-ghost" onClick={() => { setFilterMember(""); setFilterTrainer(""); }}>
+        {(filterMember || filterTrainer || search) && (
+          <button className="btn btn-ghost" onClick={() => { setFilterMember(""); setFilterTrainer(""); setSearch(""); setPage(1); }}>
             Clear
           </button>
         )}
@@ -1595,6 +1605,19 @@ export default function TrainerAssignments() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!loading && (assignments.length > 0 || page > 1) && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "12px 16px", borderTop: "1px solid var(--border)",
+        }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{count} total</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn btn-sm btn-secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>← Prev</button>
+            <button className="btn btn-sm btn-secondary" disabled={assignments.length < 20} onClick={() => setPage(p => p + 1)}>Next →</button>
+          </div>
         </div>
       )}
 

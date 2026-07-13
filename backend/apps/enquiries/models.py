@@ -14,7 +14,7 @@ class Enquiry(models.Model):
     phone      = models.CharField(max_length=15)
     email      = models.EmailField(blank=True)
     notes      = models.TextField(blank=True)
-    status     = models.CharField(max_length=20, choices=STATUS, default="new")
+    status     = models.CharField(max_length=20, choices=STATUS, default="new", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -38,6 +38,7 @@ class EnquiryFollowup(models.Model):
 
     class Meta:
         ordering = ["scheduled_date"]
+        indexes = [models.Index(fields=["scheduled_date", "sent"])]
 
     def __str__(self):
         return f"Followup for {self.enquiry.name} on {self.scheduled_date}"

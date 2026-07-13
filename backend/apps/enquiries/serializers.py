@@ -18,7 +18,9 @@ class EnquirySerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_followups_pending(self, obj):
-        return obj.followups.filter(sent=False).count()
+        # obj.followups.all() reuses the prefetch_related("followups") cache
+        # (see EnquiryViewSet.queryset) — .filter() would bypass it and re-query.
+        return sum(1 for f in obj.followups.all() if not f.sent)
 
     def get_followups_sent(self, obj):
-        return obj.followups.filter(sent=True).count()
+        return sum(1 for f in obj.followups.all() if f.sent)
