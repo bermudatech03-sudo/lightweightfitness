@@ -27,6 +27,7 @@ def _calc_gst(base_price):
     base    = Decimal(str(base_price)).quantize(Decimal("0.01"), ROUND_HALF_UP)
     gst_amt = (base * rate / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
     total   = base + gst_amt
+    logger.info(f"GST calc: base_price_in={base_price} -> base={base} rate={rate}% gst={gst_amt} total={total}")
     return base, gst_amt, total, rate
 
 def _invoice_number(member_id, date, suffix=""):
@@ -37,10 +38,12 @@ def _auto_expire_members():
     Bulk-mark active members whose renewal_date has passed as expired.
     Skips cancelled/paused. Called on every list fetch — very cheap bulk UPDATE.
     """
-    Member.objects.filter(
+    updated = Member.objects.filter(
         status="active",
         renewal_date__lt=timezone.localdate(),
     ).update(status="expired")
+    if updated:
+        logger.info(f"_auto_expire_members: marked {updated} member(s) as expired (renewal_date < {timezone.localdate()})")
 
 def _record_income_for_installment(member, payment, installment):
     """
@@ -78,6 +81,13 @@ def _record_income_for_installment(member, payment, installment):
 
     plan_total = payment.total_with_gst
 
+    logger.info(
+        f"_record_income_for_installment: member_id={member.id} invoice={payment.invoice_number} "
+        f"installment_id={installment.id} amount_paid={amount_paid} already_paid_gst={already_paid_gst} "
+        f"payment.gst_amount={payment.gst_amount} -> gst_now={gst_now} base_now={base_now} "
+        f"effective_rate={effective_rate}% plan_total={plan_total}"
+    )
+
     Income.objects.create(
         source         = f"{label} — {member.name}",
         category       = "membership",
@@ -99,11 +109,15 @@ def _record_income_for_installment(member, payment, installment):
 
 def _create_installment(payment, member, amount, installment_type, notes="", mode_of_payment="cash"):
     if amount > payment.balance:
+        logger.warning(
+            f"_create_installment rejected: member_id={member.id} invoice={payment.invoice_number} "
+            f"amount={amount} exceeds balance={payment.balance}"
+        )
         raise serializers.ValidationError(
             f"Installment amount ₹{amount} exceeds remaining balance of ₹{payment.balance}."
         )
     balance_after = max(Decimal("0"), payment.balance - Decimal(str(amount)))
-    
+
     installment = InstallmentPayment.objects.create(
         payment          = payment,
         member           = member,
@@ -117,6 +131,11 @@ def _create_installment(payment, member, amount, installment_type, notes="", mod
 
     payment.amount_paid = payment.amount_paid + Decimal(str(amount))
     payment.save()
+
+    logger.info(
+        f"_create_installment: member_id={member.id} invoice={payment.invoice_number} type={installment_type} "
+        f"amount={amount} mode={mode_of_payment} -> balance_after={balance_after} new_amount_paid={payment.amount_paid}"
+    )
 
     return installment
 
@@ -141,6 +160,11 @@ def _build_bill(member, payment, gym):
     derived_pt_fee = max(0.0, float(payment.plan_price) - plan_base_price + discount_amt - diet_amt)
     # membership_fee = original plan price (before discount) for transparent invoice display
     membership_fee = plan_base_price if payment.plan else float(payment.plan_price) + discount_amt - diet_amt - derived_pt_fee
+    logger.info(
+        f"_build_bill: invoice={payment.invoice_number} member_id={member.id} membership_fee={membership_fee} "
+        f"discount={discount_amt} pt_fee={derived_pt_fee} diet={diet_amt} gst={float(payment.gst_amount)} "
+        f"total_with_gst={float(payment.total_with_gst)} amount_paid={float(payment.amount_paid)} balance={float(payment.balance)}"
+    )
     return {
         "invoice_number":    payment.invoice_number,
         "member_id":         member.display_id(),
@@ -267,6 +291,7 @@ class MemberViewSet(viewsets.ModelViewSet):
         return qs
 
     def create(self, request, *args, **kwargs):
+        logger.info(f"MemberViewSet.create (enroll): incoming payload name={request.data.get('name')} phone={request.data.get('phone')} plan_id={request.data.get('plan_id')} amount_paid={request.data.get('amount_paid')}")
         s = EnrollSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         d = s.validated_data
@@ -298,6 +323,7 @@ class MemberViewSet(viewsets.ModelViewSet):
             plan_type=plan_type,
             personal_trainer=d.get("personal_trainer", False),
         )
+        logger.info(f"MemberViewSet.create: member created id={member.id} name={member.name} phone={member.phone} plan={plan.name if plan else None} plan_type={plan_type} join_date={join} renewal_date={renew}")
 
         amount_paid = Decimal(str(d.get("amount_paid", 0)))
         bill_data   = None
@@ -306,6 +332,10 @@ class MemberViewSet(viewsets.ModelViewSet):
             from apps.finances.gst_utils import get_diet_plan_amount as _get_diet_amt
             diet_amt     = _get_diet_amt() if (diet or plan_type in ("premium", "dietonly-standard")) else Decimal("0")
             discount_amt = Decimal(str(d.get("discount_amount", 0)))
+            logger.info(
+                f"MemberViewSet.create: enrollment pricing inputs — member_id={member.id} plan_price={plan.price} "
+                f"diet_amt={diet_amt} discount_amt={discount_amt}"
+            )
             base, gst_amt, total, rate = _calc_gst(plan.price + diet_amt - discount_amt)
             inv_no = _invoice_number(member.id, join)
 
@@ -344,7 +374,7 @@ class MemberViewSet(viewsets.ModelViewSet):
                 phone = f"91{phone}"
             send_bill_on_whatsapp(phone, bill_data, "enrollment")
         except Exception as e:
-            logger.warning(f"Bill WhatsApp send failed for enrollment: {e}")
+            logger.warning(f"Bill WhatsApp send failed for enrollment: member_id={member.id} error={e}")
 
         return Response({
             **MemberSerializer(member).data,
@@ -353,12 +383,14 @@ class MemberViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         member = self.get_object()
+        logger.info(f"MemberViewSet.destroy: deleting member id={member.id} name={member.name} phone={member.phone}")
         member.delete()
         return Response({"detail": "Member deleted."}, status=204)
 
     @action(detail=True, methods=["post"])
     def renew(self, request, pk=None):
         member = self.get_object()
+        logger.info(f"MemberViewSet.renew: member_id={member.id} name={member.name} incoming payload plan_id={request.data.get('plan_id')} amount_paid={request.data.get('amount_paid')} discount_amount={request.data.get('discount_amount')}")
         s = RenewSerializer(data=request.data)
         s.is_valid(raise_exception=True)
 
@@ -396,6 +428,11 @@ class MemberViewSet(viewsets.ModelViewSet):
         diet_amt     = _get_diet_amt() if (member.diet or new_plan_type in ("premium", "dietonly-standard")) else Decimal("0")
         discount_amt = Decimal(str(s.validated_data.get("discount_amount", 0)))
         plan_base    = (member.plan.price if member.plan else amount_paid) + diet_amt - discount_amt
+        logger.info(
+            f"MemberViewSet.renew: pricing inputs — member_id={member.id} old_renewal={old_renewal} "
+            f"new_renewal={member.renewal_date} plan_price={member.plan.price if member.plan else None} "
+            f"diet_amt={diet_amt} discount_amt={discount_amt} -> plan_base={plan_base}"
+        )
         base, gst_amt, total, rate = _calc_gst(plan_base)
         inv_no = _invoice_number(member.id, timezone.localdate(), "-R")
 
@@ -435,7 +472,7 @@ class MemberViewSet(viewsets.ModelViewSet):
                 phone = f"91{phone}"
             send_bill_on_whatsapp(phone, bill_data, "renewal")
         except Exception as e:
-            logger.warning(f"Bill WhatsApp send failed for renewal: {e}")
+            logger.warning(f"Bill WhatsApp send failed for renewal: member_id={member.id} error={e}")
 
         return Response({
             **MemberSerializer(member).data,
@@ -445,6 +482,7 @@ class MemberViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="pay-balance")
     def pay_balance(self, request, pk=None):
         member = self.get_object()
+        logger.info(f"MemberViewSet.pay_balance: member_id={member.id} name={member.name} incoming amount_paid={request.data.get('amount_paid')}")
         s = BalancePaymentSerializer(data=request.data)
         s.is_valid(raise_exception=True)
 
@@ -453,12 +491,15 @@ class MemberViewSet(viewsets.ModelViewSet):
         ).order_by("-paid_date").first()
 
         if not payment:
+            logger.warning(f"MemberViewSet.pay_balance: rejected — member_id={member.id} has no outstanding balance")
             return Response({"detail": "No outstanding balance."}, status=400)
 
         extra = Decimal(str(s.validated_data["amount_paid"]))
         if extra <= 0:
+            logger.warning(f"MemberViewSet.pay_balance: rejected — member_id={member.id} amount={extra} must be > 0")
             return Response({"detail": "Amount must be > 0."}, status=400)
         if extra > payment.balance:
+            logger.warning(f"MemberViewSet.pay_balance: rejected — member_id={member.id} amount={extra} exceeds balance={payment.balance}")
             return Response({
                 "detail": f"Amount ₹{extra} exceeds balance of ₹{payment.balance}."
             }, status=400)
@@ -480,7 +521,7 @@ class MemberViewSet(viewsets.ModelViewSet):
                 phone = f"91{phone}"
             send_bill_on_whatsapp(phone, bill_data, "balance")
         except Exception as e:
-            logger.warning(f"Bill WhatsApp send failed for balance payment: {e}")
+            logger.warning(f"Bill WhatsApp send failed for balance payment: member_id={member.id} error={e}")
 
         return Response({
             **MemberPaymentSerializer(payment).data,
@@ -497,13 +538,16 @@ class MemberViewSet(viewsets.ModelViewSet):
         """
         from apps.finances.gst_utils import get_diet_plan_amount as _get_diet_amt
         member = self.get_object()
+        logger.info(f"MemberViewSet.upgrade_diet: member_id={member.id} name={member.name} amount_paid={request.data.get('amount_paid')}")
 
         latest_payment = member.payments.select_related("plan").order_by("-created_at").first()
         if not latest_payment:
+            logger.warning(f"MemberViewSet.upgrade_diet: rejected — member_id={member.id} has no payment record")
             return Response({"detail": "No payment record found for this member."}, status=400)
 
         diet_amt_full = _get_diet_amt()
         if diet_amt_full <= 0:
+            logger.warning(f"MemberViewSet.upgrade_diet: rejected — member_id={member.id} diet plan amount not configured")
             return Response({"detail": "Diet plan amount is not configured in settings."}, status=400)
 
         # Prorate diet by pending days in membership (capped at 30), same logic as PT
@@ -515,6 +559,10 @@ class MemberViewSet(viewsets.ModelViewSet):
             diet_amt = diet_amt_full
 
         if latest_payment.diet_plan_amount >= diet_amt:
+            logger.warning(
+                f"MemberViewSet.upgrade_diet: rejected — member_id={member.id} diet fee already included "
+                f"(existing={latest_payment.diet_plan_amount} >= new={diet_amt})"
+            )
             return Response({"detail": "Diet plan fee already included in this payment cycle."}, status=400)
 
         # Re-derive existing PT fee from:
@@ -525,6 +573,11 @@ class MemberViewSet(viewsets.ModelViewSet):
         existing_pt_fee = max(
             Decimal("0"),
             latest_payment.plan_price - plan_base_price + discount_amt - latest_payment.diet_plan_amount
+        )
+        logger.info(
+            f"MemberViewSet.upgrade_diet: pricing inputs — member_id={member.id} diet_amt_full={diet_amt_full} "
+            f"prorated_diet_amt={diet_amt} plan_base_price={plan_base_price} discount_amt={discount_amt} "
+            f"derived_existing_pt_fee={existing_pt_fee}"
         )
 
         base, gst_amt, total, rate = _calc_gst(plan_base_price - discount_amt + existing_pt_fee + diet_amt)
@@ -561,6 +614,7 @@ class MemberViewSet(viewsets.ModelViewSet):
         if reason:
             member.notes = reason + "\n" + member.notes
         member.save()
+        logger.info(f"MemberViewSet.cancel: member_id={member.id} name={member.name} cancelled, reason={reason!r}")
         return Response({"detail": "Member cancelled"})
 
     @action(detail=False, methods=["get"])
@@ -623,7 +677,7 @@ class MemberAttendanceViewSet(viewsets.ModelViewSet):
             from apps.staff.views import _auto_mark_absent_members
             _auto_mark_absent_members()
         except Exception:
-            pass
+            logger.exception("MemberAttendanceViewSet.list: _auto_mark_absent_members failed")
         return super().list(request, *args, **kwargs)
 
     @action(detail=False, methods=["get"])
@@ -707,12 +761,14 @@ class KioskMarkAttendanceView(APIView):
                         member=member, date=today, check_in=local_time
                     )
                     act = "check_in"
+                logger.info(f"KioskMarkAttendanceView: member_id={member.id} name={member.name} action={act} time={local_time}")
                 return Response({
                     "action": act, "name": member.name,
                     "time":   local_now.strftime("%I:%M %p"),   # display IST
                     "date":   str(today), "type": "member",
                 })
             except Member.DoesNotExist:
+                logger.warning(f"KioskMarkAttendanceView: member not found for id={pid}")
                 return Response({"detail": "Member not found."}, status=404)
 
         # ── PATCH: apps/members/views.py — KioskMarkAttendanceView ──────────────────
@@ -755,6 +811,7 @@ class KioskMarkAttendanceView(APIView):
                     )
                     act = "check_in"
 
+                logger.info(f"KioskMarkAttendanceView: staff_id={staff.id} name={staff.name} action={act} time={local_time}")
                 return Response({
                     "action": act,
                     "name":   staff.name,
@@ -764,6 +821,7 @@ class KioskMarkAttendanceView(APIView):
                 })
 
             except StaffMember.DoesNotExist:
+                logger.warning(f"KioskMarkAttendanceView: staff not found for id={pid}")
                 return Response({"detail": "Staff not found."}, status=404)
     
 class DietPlanViewSet(viewsets.ModelViewSet):
@@ -783,11 +841,13 @@ class DietPlanViewSet(viewsets.ModelViewSet):
             )
 
     def create(self, request, *args, **kwargs):
+        items = request.data.get("items", [])
         plan = DietPlan.objects.create(
             name=request.data.get("name", "Unnamed Plan"),
             foodType=request.data.get("foodType", "veg"),
         )
-        self._save_items(plan, request.data.get("items", []))
+        self._save_items(plan, items)
+        logger.info(f"DietPlanViewSet.create: diet plan id={plan.id} name={plan.name} items_count={len(items)}")
         return Response(DietPlanSerializer(plan).data, status=201)
 
     def update(self, request, *args, **kwargs):
@@ -796,7 +856,9 @@ class DietPlanViewSet(viewsets.ModelViewSet):
         plan.foodType = request.data.get("foodType", plan.foodType)
         plan.save()
         plan.items.all().delete()
-        self._save_items(plan, request.data.get("items", []))
+        items = request.data.get("items", [])
+        self._save_items(plan, items)
+        logger.info(f"DietPlanViewSet.update: diet plan id={plan.id} name={plan.name} items_count={len(items)}")
         return Response(DietPlanSerializer(plan).data)
 
 
@@ -854,17 +916,21 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         from apps.staff.models import StaffMember
         from django.core.exceptions import ValidationError as DjValidationError
         data = request.data
+        logger.info(f"MemberTrainerAssignmentViewSet.create: incoming member_id={data.get('member')} trainer_id={data.get('trainer')} plan_id={data.get('plan')} amount_paid={data.get('amount_paid')}")
 
         try:
             member  = Member.objects.select_related("plan").get(pk=data.get("member"))
             trainer = StaffMember.objects.get(pk=data.get("trainer"), role="trainer")
         except Member.DoesNotExist:
+            logger.warning(f"MemberTrainerAssignmentViewSet.create: rejected — member not found id={data.get('member')}")
             return Response({"detail": "Member not found."}, status=400)
         except StaffMember.DoesNotExist:
+            logger.warning(f"MemberTrainerAssignmentViewSet.create: rejected — trainer not found id={data.get('trainer')}")
             return Response({"detail": "Trainer not found or staff member is not a Trainer."}, status=400)
 
         ok, err = self._check_plan_eligibility(member)
         if not ok:
+            logger.warning(f"MemberTrainerAssignmentViewSet.create: rejected — member_id={member.id} eligibility check failed: {err}")
             return Response({"detail": err}, status=400)
 
         plan = None
@@ -892,9 +958,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         try:
             assignment.full_clean()
         except DjValidationError as exc:
+            logger.warning(f"MemberTrainerAssignmentViewSet.create: rejected — member_id={member.id} trainer_id={trainer.id} validation failed: {'; '.join(exc.messages)}")
             return Response({"detail": "; ".join(exc.messages)}, status=400)
 
         assignment.save()
+        logger.info(f"MemberTrainerAssignmentViewSet.create: assignment created id={assignment.id} member_id={member.id} trainer_id={trainer.id} pt_start={pt_start} pt_end={pt_end}")
 
         latest_payment = member.payments.select_related("plan").order_by("-created_at").first()
 
@@ -908,6 +976,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         has_diet_fee = bool(member.diet) or member.plan_type in ("premium", "dietonly-standard")
         diet_full = _get_diet_amt() if has_diet_fee else Decimal("0")
         diet_amt_current = (diet_full / 30 * pt_days).quantize(Decimal("0.01"), ROUND_HALF_UP) if (has_diet_fee and pt_days < 30) else diet_full
+        logger.info(
+            f"MemberTrainerAssignmentViewSet.create: PT/diet proration — assignment_id={assignment.id} "
+            f"trainer_fee_full={trainer_fee_full} pt_days={pt_days} -> trainer_fee={trainer_fee} "
+            f"has_diet_fee={has_diet_fee} diet_full={diet_full} -> diet_amt_current={diet_amt_current}"
+        )
 
         if latest_payment and latest_payment.plan:
             base, gst_amt, total, rate = _calc_gst(
@@ -944,11 +1017,13 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         from django.core.exceptions import ValidationError as DjValidationError
         assignment = self.get_object()
         data       = request.data
+        logger.info(f"MemberTrainerAssignmentViewSet.update: assignment_id={assignment.id} member_id={assignment.member_id} payload keys={list(data.keys())}")
 
         if data.get("trainer"):
             try:
                 assignment.trainer = StaffMember.objects.get(pk=data["trainer"], role="trainer")
             except StaffMember.DoesNotExist:
+                logger.warning(f"MemberTrainerAssignmentViewSet.update: rejected — trainer not found id={data.get('trainer')} for assignment_id={assignment.id}")
                 return Response({"detail": "Trainer not found or staff member is not a Trainer."}, status=400)
 
         if data.get("plan"):
@@ -972,9 +1047,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         try:
             assignment.full_clean()
         except DjValidationError as exc:
+            logger.warning(f"MemberTrainerAssignmentViewSet.update: rejected — assignment_id={assignment.id} validation failed: {'; '.join(exc.messages)}")
             return Response({"detail": "; ".join(exc.messages)}, status=400)
 
         assignment.save()
+        logger.info(f"MemberTrainerAssignmentViewSet.update: assignment_id={assignment.id} updated — pt_start={assignment.pt_start_date} pt_end={assignment.pt_end_date}")
         return Response(TrainerAssignmentSerializer(assignment).data)
 
     @action(detail=True, methods=["post"], url_path="pay-trainer-fee")
@@ -982,19 +1059,23 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         from apps.finances.models import Expenditure
         from apps.finances.gst_utils import get_pt_payable_percent
         assignment = self.get_object()
+        logger.info(f"MemberTrainerAssignmentViewSet.pay_trainer_fee: assignment_id={assignment.id} member_id={assignment.member_id} trainer_id={assignment.trainer_id}")
 
         pt_amt = assignment.trainer.personal_trainer_amt
         if not pt_amt or pt_amt <= 0:
+            logger.warning(f"MemberTrainerAssignmentViewSet.pay_trainer_fee: rejected — assignment_id={assignment.id} trainer has no PT fee configured")
             return Response({"detail": "This trainer has no PT fee configured."}, status=400)
 
         pt_payable_pct = get_pt_payable_percent()
         payable_amt    = (Decimal(str(pt_amt)) * pt_payable_pct / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        logger.info(f"MemberTrainerAssignmentViewSet.pay_trainer_fee: assignment_id={assignment.id} pt_amt={pt_amt} pt_payable_pct={pt_payable_pct}% -> payable_amt={payable_amt}")
 
         with transaction.atomic():
             updated = TrainerAssignment.objects.filter(
                 pk=assignment.pk, trainer_fee_paid=False
             ).update(trainer_fee_paid=True)
             if not updated:
+                logger.warning(f"MemberTrainerAssignmentViewSet.pay_trainer_fee: rejected — assignment_id={assignment.id} trainer fee already paid")
                 return Response({"detail": "Trainer fee already paid for this member."}, status=400)
 
             Expenditure.objects.create(
@@ -1022,14 +1103,18 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         """
         from apps.finances.models import Expenditure
         assignment = self.get_object()
+        logger.info(f"MemberTrainerAssignmentViewSet.pay_pt_trainer_fee: assignment_id={assignment.id} member_id={assignment.member_id} trainer_id={assignment.trainer_id}")
 
         unpaid_renewals = list(assignment.pt_renewals.filter(trainer_paid=False))
         if not unpaid_renewals:
+            logger.warning(f"MemberTrainerAssignmentViewSet.pay_pt_trainer_fee: rejected — assignment_id={assignment.id} no pending PT renewal trainer payments")
             return Response({"detail": "No pending PT renewal trainer payments."}, status=400)
 
         total_payable = sum(r.trainer_payable_amount for r in unpaid_renewals)
         if total_payable <= 0:
+            logger.warning(f"MemberTrainerAssignmentViewSet.pay_pt_trainer_fee: rejected — assignment_id={assignment.id} total_payable={total_payable} <= 0")
             return Response({"detail": "No trainer amount to pay."}, status=400)
+        logger.info(f"MemberTrainerAssignmentViewSet.pay_pt_trainer_fee: assignment_id={assignment.id} {len(unpaid_renewals)} unpaid renewal(s) -> total_payable={total_payable}")
 
         today     = timezone.localdate()
         trainer   = assignment.trainer
@@ -1067,16 +1152,19 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         assignment = self.get_object()
         member     = assignment.member
         today      = timezone.localdate()
+        logger.info(f"MemberTrainerAssignmentViewSet.pay_pt_balance: assignment_id={assignment.id} member_id={member.id} incoming amount_paid={request.data.get('amount_paid')}")
 
         renewal = assignment.pt_renewals.filter(
             status__in=["partial", "pending"]
         ).order_by("-created_at").first()
 
         if not renewal:
+            logger.warning(f"MemberTrainerAssignmentViewSet.pay_pt_balance: rejected — assignment_id={assignment.id} no pending PT balance found")
             return Response({"detail": "No pending PT balance found."}, status=400)
 
         balance = renewal.total_amount - renewal.amount_paid
         if balance <= 0:
+            logger.warning(f"MemberTrainerAssignmentViewSet.pay_pt_balance: rejected — assignment_id={assignment.id} renewal_id={renewal.id} no balance remaining")
             return Response({"detail": "No balance remaining on this PT renewal."}, status=400)
 
         amount_paid     = Decimal(str(request.data.get("amount_paid", 0)))
@@ -1084,6 +1172,7 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         notes           = request.data.get("notes", "")
 
         if amount_paid <= 0:
+            logger.warning(f"MemberTrainerAssignmentViewSet.pay_pt_balance: rejected — assignment_id={assignment.id} amount_paid={amount_paid} must be > 0")
             return Response({"detail": "amount_paid must be greater than 0."}, status=400)
 
         amount_paid = min(amount_paid, balance)
@@ -1093,6 +1182,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         new_balance = renewal.total_amount - renewal.amount_paid
         renewal.status = "paid" if new_balance <= Decimal("0.01") else "partial"
         renewal.save()
+        logger.info(
+            f"MemberTrainerAssignmentViewSet.pay_pt_balance: renewal_id={renewal.id} member_id={member.id} "
+            f"pre_balance={balance} amount_paid_now={amount_paid} -> new_amount_paid={renewal.amount_paid} "
+            f"new_balance={new_balance} status={renewal.status}"
+        )
 
         # GST-first allocation for the balance payment
         gst_collected = Income.objects.filter(invoice_number=renewal.invoice_number).aggregate(
@@ -1102,6 +1196,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         gst_now  = min(amount_paid, gst_remaining).quantize(Decimal("0.01"), ROUND_HALF_UP)
         base_now = (amount_paid - gst_now).quantize(Decimal("0.01"), ROUND_HALF_UP)
         eff_rate = Decimal(str(renewal.gst_rate)) if gst_now > 0 else Decimal("0")
+        logger.info(
+            f"MemberTrainerAssignmentViewSet.pay_pt_balance: GST-first allocation — renewal_id={renewal.id} "
+            f"renewal.gst_amount={renewal.gst_amount} gst_collected_so_far={gst_collected} "
+            f"gst_remaining={gst_remaining} -> gst_now={gst_now} base_now={base_now} eff_rate={eff_rate}%"
+        )
 
         Income.objects.create(
             source         = f"PT Renewal (Balance) — {member.name}",
@@ -1160,7 +1259,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         phone = str(member.phone or "").strip().replace(" ", "").replace("-", "")
         if phone and not phone.startswith("91"):
             phone = f"91{phone}"
-        send_bill_on_whatsapp(phone, bill_data, "pt_balance")
+        try:
+            send_bill_on_whatsapp(phone, bill_data, "pt_balance")
+        except Exception:
+            logger.exception(f"MemberTrainerAssignmentViewSet.pay_pt_balance: WhatsApp bill send failed for member_id={member.id} renewal_id={renewal.id}")
+            raise
 
         return Response(TrainerAssignmentSerializer(assignment).data)
 
@@ -1174,12 +1277,16 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         member     = assignment.member
         trainer    = assignment.trainer
         today      = timezone.localdate()
+        logger.info(f"MemberTrainerAssignmentViewSet.pt_renewal_preview: assignment_id={assignment.id} member_id={member.id}")
 
         if member.status != "active":
+            logger.info(f"pt_renewal_preview: assignment_id={assignment.id} cannot renew — member status={member.status}")
             return Response({"can_renew": False, "reason": "Member plan is not active."})
         if not member.renewal_date or member.renewal_date <= today:
+            logger.info(f"pt_renewal_preview: assignment_id={assignment.id} cannot renew — member plan expired (renewal_date={member.renewal_date})")
             return Response({"can_renew": False, "reason": "Member plan has expired. Renew the membership first."})
         if assignment.pt_end_date and assignment.pt_end_date >= member.renewal_date:
+            logger.info(f"pt_renewal_preview: assignment_id={assignment.id} cannot renew — PT already covers plan expiry (pt_end={assignment.pt_end_date}, plan_end={member.renewal_date})")
             return Response({
                 "can_renew": False,
                 "reason": f"PT is already active until plan expiry ({member.renewal_date}). Extend the membership plan to unlock PT renewal.",
@@ -1195,9 +1302,14 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
 
         full_amt = Decimal(str(trainer.personal_trainer_amt or 0))
         if full_amt <= 0:
+            logger.warning(f"pt_renewal_preview: assignment_id={assignment.id} trainer_id={trainer.id} has no PT fee configured")
             return Response({"can_renew": False, "reason": "Trainer has no PT fee configured."})
 
         base = (full_amt / 30 * pt_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        logger.info(
+            f"pt_renewal_preview: assignment_id={assignment.id} plan_days_remaining={plan_days_remaining} "
+            f"current_pt_remaining={current_pt_remaining} -> pt_days={pt_days} full_amt={full_amt} base={base}"
+        )
         base_calc, gst_amt, total, rate = _calc_gst(base)
 
         # End date = today + paid days + bonus days already active, capped at plan expiry
@@ -1242,15 +1354,19 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         member     = assignment.member
         trainer    = assignment.trainer
         today      = timezone.localdate()
+        logger.info(f"MemberTrainerAssignmentViewSet.renew_pt: assignment_id={assignment.id} member_id={member.id} trainer_id={trainer.id} amount_paid={request.data.get('amount_paid')}")
 
         # ── Validation ───────────────────────────────────────────────────────
         if member.status != "active":
+            logger.warning(f"renew_pt: rejected — assignment_id={assignment.id} member status={member.status} (not active)")
             return Response({"detail": "Member plan is not active. Renew membership first."}, status=400)
 
         if not member.renewal_date or member.renewal_date <= today:
+            logger.warning(f"renew_pt: rejected — assignment_id={assignment.id} member plan expired (renewal_date={member.renewal_date})")
             return Response({"detail": "Member plan has expired. Renew the membership plan first."}, status=400)
 
         if assignment.pt_end_date and assignment.pt_end_date >= member.renewal_date:
+            logger.warning(f"renew_pt: rejected — assignment_id={assignment.id} PT already covers plan expiry (pt_end={assignment.pt_end_date}, plan_end={member.renewal_date})")
             return Response({"detail": f"PT is already active until plan expiry ({member.renewal_date}). Extend the membership plan first."}, status=400)
 
         plan_days_remaining  = (member.renewal_date - today).days
@@ -1262,14 +1378,20 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         pt_days = min(30, max(0, plan_days_remaining - current_pt_remaining))
 
         if pt_days <= 0:
+            logger.warning(f"renew_pt: rejected — assignment_id={assignment.id} pt_days={pt_days} (no new PT days to renew)")
             return Response({"detail": "No new PT days to renew — PT already covers the remaining plan period."}, status=400)
 
         full_amt = Decimal(str(trainer.personal_trainer_amt or 0))
         if full_amt <= 0:
+            logger.warning(f"renew_pt: rejected — assignment_id={assignment.id} trainer_id={trainer.id} has no PT fee configured")
             return Response({"detail": "Trainer has no PT fee configured."}, status=400)
 
         # ── Amount calculation (based on new days only) ───────────────────────
         base_for_days = (full_amt / 30 * pt_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        logger.info(
+            f"renew_pt: assignment_id={assignment.id} plan_days_remaining={plan_days_remaining} "
+            f"current_pt_remaining={current_pt_remaining} -> pt_days={pt_days} full_amt={full_amt} base_for_days={base_for_days}"
+        )
         base, gst_amt, total, rate = _calc_gst(base_for_days)
 
         amount_paid     = Decimal(str(request.data.get("amount_paid", 0)))
@@ -1298,6 +1420,10 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         from apps.finances.gst_utils import get_pt_payable_percent
         pt_payable_pct         = get_pt_payable_percent()
         trainer_payable_amount = (base * pt_payable_pct / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        logger.info(
+            f"renew_pt: assignment_id={assignment.id} invoice={inv_no} amount_paid={amount_paid} total={total} "
+            f"-> status={renewal_status} trainer_payable_amount = base({base}) * pt_payable_pct({pt_payable_pct}%) = {trainer_payable_amount}"
+        )
 
         # ── Create PTRenewal record ───────────────────────────────────────────
         renewal = PTRenewal.objects.create(
@@ -1321,6 +1447,8 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
             trainer_paid           = False,
         )
 
+        logger.info(f"renew_pt: PTRenewal created id={renewal.id} invoice={inv_no} member_id={member.id} pt_start={pt_start} pt_end={pt_end} pt_days={pt_days} base={base} gst={gst_amt} total={total}")
+
         # ── Update assignment PT dates ────────────────────────────────────────
         assignment.pt_start_date = pt_start
         assignment.pt_end_date   = pt_end
@@ -1333,6 +1461,10 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
             gst_now = min(amount_paid, gst_remaining).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_now = (amount_paid - gst_now).quantize(Decimal("0.01"), ROUND_HALF_UP)
             effective_rate = Decimal(str(rate)) if gst_now > 0 else Decimal("0")
+            logger.info(
+                f"renew_pt: Income allocation — renewal_id={renewal.id} amount_paid={amount_paid} "
+                f"gst_amt={gst_amt} -> gst_now={gst_now} base_now={base_now} effective_rate={effective_rate}%"
+            )
 
             Income.objects.create(
                 source         = f"PT Renewal — {member.name}",
@@ -1392,7 +1524,11 @@ class MemberTrainerAssignmentViewSet(viewsets.ModelViewSet):
         phone = str(member.phone or "").strip().replace(" ", "").replace("-", "")
         if phone and not phone.startswith("91"):
             phone = f"91{phone}"
-        send_bill_on_whatsapp(phone, bill_data, "pt_renewal")
+        try:
+            send_bill_on_whatsapp(phone, bill_data, "pt_renewal")
+        except Exception:
+            logger.exception(f"renew_pt: WhatsApp bill send failed for member_id={member.id} renewal_id={renewal.id}")
+            raise
 
         return Response({
             **TrainerAssignmentSerializer(assignment).data,

@@ -17,6 +17,7 @@ def run_auto_mark_absent():
     """
     try:
         from apps.staff.views import _auto_mark_absent_staff, _auto_mark_absent_members
+        logger.info("run_auto_mark_absent: starting nightly auto-absent backfill")
         _auto_mark_absent_staff()
         _auto_mark_absent_members()
         logger.info("run_auto_mark_absent: completed")
@@ -26,48 +27,60 @@ def run_auto_mark_absent():
 def send_renewal_reminders():
     # Fire exactly 3 days before the renewal date
     target = timezone.now().date() + timedelta(days=3)
-    members = Member.objects.filter(
+    members = list(Member.objects.filter(
         status = "active",
         renewal_date = target,
-    )
+    ))
+    logger.info(f"send_renewal_reminders: found {len(members)} member(s) expiring on {target}")
     for member in members:
         send_notification(member, "renewal_remind")
+    logger.info(f"send_renewal_reminders: completed, processed {len(members)} member(s)")
 
 def send_expiry_notices():
     today = timezone.now().date()
     # Auto-expire anyone past renewal date
-    Member.objects.filter(
+    auto_expired_count = Member.objects.filter(
         status="active",
         renewal_date__lt=today,
     ).update(status="expired")
+    if auto_expired_count:
+        logger.info(f"send_expiry_notices: auto-expired {auto_expired_count} member(s) past renewal date")
 
     # Send expiry notice exactly 3 days after expiry
     target = today - timedelta(days=3)
-    for member in Member.objects.filter(status="expired", renewal_date=target):
+    members = list(Member.objects.filter(status="expired", renewal_date=target))
+    logger.info(f"send_expiry_notices: found {len(members)} member(s) expired on {target}")
+    for member in members:
         send_notification(member, "expiry")
+    logger.info(f"send_expiry_notices: completed, sent {len(members)} expiry notice(s)")
 
 def send_daily_notice():
     from apps.finances.gst_utils import is_notify_enabled
     if not is_notify_enabled("NOTIFY_DAILY_NOTICE"):
+        logger.warning("send_daily_notice: skipped — NOTIFY_DAILY_NOTICE is disabled")
         return
 
-    items = ToBuy.objects.filter(
+    items = list(ToBuy.objects.filter(
         status = "pending",
-    )
+    ))
     today = timezone.localdate()
     income      = Income.objects.filter(date__year=today.year, date__month=today.month).aggregate(t=Sum("amount"))["t"] or 0
     expenditure = Expenditure.objects.filter(date__year=today.year, date__month=today.month).aggregate(t=Sum("amount"))["t"] or 0
     money_left  = income - expenditure
+    logger.info(f"send_daily_notice: found {len(items)} pending item(s) to restock, money_left={money_left}")
 
     for item in items:
         send_notification_admin(item,money_left,"daily_notice")
+    logger.info(f"send_daily_notice: completed, sent {len(items)} notice(s)")
 
 def send_message_for_absentees():
     today = timezone.now().date()
     attended_ids = MemberAttendance.objects.filter(date=today).values_list("member_id", flat=True)
-    absentees = Member.objects.filter(status="active", personal_trainer=False).exclude(id__in=attended_ids)
+    absentees = list(Member.objects.filter(status="active", personal_trainer=False).exclude(id__in=attended_ids))
+    logger.info(f"send_message_for_absentees: found {len(absentees)} absentee(s) for {today}")
     for member in absentees:
         send_notification(member, "absent")
+    logger.info(f"send_message_for_absentees: completed, sent {len(absentees)} absent notice(s)")
 
 
 def send_message_for_pt_absentees():
@@ -86,10 +99,11 @@ def send_message_for_pt_absentees():
         MemberAttendance.objects.filter(date=today).values_list("member_id", flat=True)
     )
 
-    assignments = TrainerAssignment.objects.filter(
+    assignments = list(TrainerAssignment.objects.filter(
         member__status="active",
         member__personal_trainer=True,
-    ).select_related("member")
+    ).select_related("member"))
+    logger.info(f"send_message_for_pt_absentees: evaluating {len(assignments)} PT assignment(s) for {today}")
 
     notified_member_ids = set()
     for assignment in assignments:
@@ -106,6 +120,7 @@ def send_message_for_pt_absentees():
             continue
         send_notification(assignment.member, "absent")
         notified_member_ids.add(assignment.member_id)
+    logger.info(f"send_message_for_pt_absentees: completed, notified {len(notified_member_ids)} member(s)")
 
 
 
@@ -130,8 +145,10 @@ def send_staff_absent_notifications():
         ).values_list("staff_id", flat=True)
     )
 
-    staff_list = StaffMember.objects.filter(status="active").select_related("shift_template")
+    staff_list = list(StaffMember.objects.filter(status="active").select_related("shift_template"))
+    logger.info(f"send_staff_absent_notifications: evaluating {len(staff_list)} active staff member(s) for {today}")
 
+    notified_count = 0
     for staff in staff_list:
         shift = staff.shift_template
         if shift:
@@ -144,6 +161,8 @@ def send_staff_absent_notifications():
         if staff.id in checked_in_ids:
             continue
         send_staff_notification(staff, "staff_absent")
+        notified_count += 1
+    logger.info(f"send_staff_absent_notifications: completed, notified {notified_count} staff member(s)")
 
 
 def send_diet_notifications():
@@ -152,6 +171,7 @@ def send_diet_notifications():
     from apps.finances.gst_utils import is_notify_enabled
 
     if not is_notify_enabled("NOTIFY_DIET_REMINDER"):
+        logger.warning("send_diet_notifications: skipped — NOTIFY_DIET_REMINDER is disabled")
         return
 
     now = timezone.localtime(timezone.now())
@@ -160,17 +180,20 @@ def send_diet_notifications():
 
     # Handle window that crosses midnight (e.g. 23:58 → 00:03)
     if window_start <= window_end:
-        items = Diet.objects.filter(
+        items = list(Diet.objects.filter(
             time__gte=window_start, time__lt=window_end
-        ).select_related("plan")
+        ).select_related("plan"))
     else:
-        items = Diet.objects.filter(
+        items = list(Diet.objects.filter(
             Q(time__gte=window_start) | Q(time__lt=window_end)
-        ).select_related("plan")
+        ).select_related("plan"))
+
+    logger.info(f"send_diet_notifications: found {len(items)} diet item(s) due in window {window_start}-{window_end}")
 
     from apps.notifications.utils import TRIGGER_TEMPLATES
     template_name = TRIGGER_TEMPLATES.get("diet_reminder", "")
 
+    sent_count = 0
     for item in items:
         members = Member.objects.filter(status="active", diet=item.plan)
         for member in members:
@@ -184,22 +207,27 @@ def send_diet_notifications():
                 f"Time to have {item.quantity}{item.unit} of {item.food} ({item.calories} cal). "
                 f"Stay consistent with your diet plan!"
             )
-            Notification.objects.create(
-                recipient_name=member.name,
-                recipient_phone=phone,
-                channel="whatsapp",
-                trigger_type="diet_reminder",
-                message=message,
-                template_name=template_name,
-                template_params=[
-                    member.name,
-                    str(item.quantity),
-                    str(item.unit),
-                    str(item.food),
-                    str(item.calories),
-                ],
-                status="pending",
-            )
+            try:
+                Notification.objects.create(
+                    recipient_name=member.name,
+                    recipient_phone=phone,
+                    channel="whatsapp",
+                    trigger_type="diet_reminder",
+                    message=message,
+                    template_name=template_name,
+                    template_params=[
+                        member.name,
+                        str(item.quantity),
+                        str(item.unit),
+                        str(item.food),
+                        str(item.calories),
+                    ],
+                    status="pending",
+                )
+                sent_count += 1
+            except Exception:
+                logger.exception(f"send_diet_notifications: failed to create notification for {member.name} ({phone})")
+    logger.info(f"send_diet_notifications: completed, created {sent_count} notification(s)")
 
 
 def send_weekly_pending_payment_reminders():
@@ -234,6 +262,9 @@ def send_weekly_pending_payment_reminders():
         _m._total_paid_cache = _m._ann_total_paid or 0
         _m._total_due_cache  = _m._ann_total_due or 0
 
+    logger.info(f"send_weekly_pending_payment_reminders: found {len(members_with_balance)} member(s) with a pending balance")
+
+    sent_count = 0
     for member in members_with_balance:
         if bulk_slots_remaining() <= 0:
             logger.warning(
@@ -241,11 +272,17 @@ def send_weekly_pending_payment_reminders():
             )
             break
         send_pending_payment_reminder(member)
+        sent_count += 1
         time.sleep(2)  # 1 message per 2 seconds = 30 per minute
+
+    logger.info(f"send_weekly_pending_payment_reminders: sent {sent_count}/{len(members_with_balance)} member reminder(s)")
 
     # Admin summary always sends — it is a single message, not subject to the bulk cap.
     if members_with_balance:
         send_pending_payment_admin_summary(members_with_balance)
+        logger.info("send_weekly_pending_payment_reminders: admin summary sent")
+    else:
+        logger.info("send_weekly_pending_payment_reminders: no pending-balance members found, admin summary skipped")
 
 
 def retry_failed_notifications():
@@ -269,17 +306,23 @@ def retry_failed_notifications():
     BATCH_SIZE  = 50
     cutoff      = timezone.now() - timedelta(hours=24)  # only retry last 24 hrs
 
-    failed = Notification.objects.filter(
+    failed = list(Notification.objects.filter(
         status="failed",
         retry_count__lt=MAX_RETRIES,
         created_at__gte=cutoff,
     ).exclude(
         template_name__in=_NO_RETRY_TEMPLATES,
-    )[:BATCH_SIZE]
+    )[:BATCH_SIZE])
 
+    logger.info(f"retry_failed_notifications: found {len(failed)} failed notification(s) eligible for retry")
+
+    attempted_count = 0
+    succeeded_count = 0
     for notif in failed:
         if not notif.recipient_phone:
+            logger.warning(f"retry_failed_notifications: notification {notif.pk} has no recipient phone, skipping")
             continue
+        attempted_count += 1
         if notif.template_name:
             result = send_whatsapp_template(
                 to=notif.recipient_phone,
@@ -296,12 +339,17 @@ def retry_failed_notifications():
                 retry_count=notif.retry_count + 1,
                 error_log="",
             )
+            succeeded_count += 1
+            logger.info(f"retry_failed_notifications: notification {notif.pk} retried successfully")
         else:
             Notification.objects.filter(pk=notif.pk).update(
                 retry_count=notif.retry_count + 1,
                 error_log=result.get("error", "Unknown error"),
             )
+            logger.warning(f"retry_failed_notifications: notification {notif.pk} retry failed: {result.get('error')}")
         time.sleep(0.1)   # 100ms between retries
+
+    logger.info(f"retry_failed_notifications: completed, attempted {attempted_count}, succeeded {succeeded_count}")
 
 
 def send_enquiry_followups():
@@ -319,16 +367,21 @@ def send_enquiry_followups():
     gym_name  = get_setting("GYM_NAME", "the Gym")
     gym_phone = get_setting("GYM_PHONE", "")
 
-    due = EnquiryFollowup.objects.filter(
+    due = list(EnquiryFollowup.objects.filter(
         scheduled_date=today, sent=False
-    ).select_related("enquiry")
+    ).select_related("enquiry"))
+    logger.info(f"send_enquiry_followups: found {len(due)} follow-up(s) due for {today}")
 
+    sent_count = 0
+    skipped_status_count = 0
+    notify_disabled_logged = False
     for followup in due:
         enquiry = followup.enquiry
         if enquiry.status != "followup":
             followup.sent = True
             followup.sent_at = timezone.now()
             followup.save()
+            skipped_status_count += 1
             continue
 
         phone = str(enquiry.phone or "").strip().replace(" ", "").replace("-", "")
@@ -350,17 +403,26 @@ def send_enquiry_followups():
                 message=message,
                 status="pending",
             )
+            sent_count += 1
+        elif not notify_disabled_logged:
+            logger.warning("send_enquiry_followups: NOTIFY_ENQUIRY_FOLLOWUP is disabled — due follow-ups will be marked sent without messaging")
+            notify_disabled_logged = True
 
         followup.sent    = True
         followup.sent_at = timezone.now()
         followup.save()
 
-    Enquiry.objects.filter(
+    lost_count = Enquiry.objects.filter(
         status__in=["new", "followup"]
     ).annotate(
         last_followup=Max("followups__scheduled_date")
     ).filter(
         last_followup__lt=today
     ).update(status="lost")
+
+    logger.info(
+        f"send_enquiry_followups: completed, sent {sent_count}, skipped {skipped_status_count} "
+        f"(status not 'followup'), marked {lost_count} enquiry(ies) as lost"
+    )
 
 

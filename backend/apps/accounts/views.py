@@ -16,6 +16,16 @@ class LoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [permissions.AllowAny]
 
+    def post(self, request, *args, **kwargs):
+        username = request.data.get("username")
+        try:
+            response = super().post(request, *args, **kwargs)
+        except Exception:
+            logger.warning(f"[Login] Failed login attempt for username: {username}")
+            raise
+        logger.info(f"[Login] Successful login for username: {username}")
+        return response
+
 class MeView(generics.RetrieveUpdateAPIView):
     serializer_class = UserSerializer
     def get_object(self):
@@ -27,9 +37,11 @@ class ChangePasswordView(APIView):
         s.is_valid(raise_exception=True)
         user = request.user
         if not user.check_password(s.validated_data["old_password"]):
+            logger.warning(f"[ChangePassword] Wrong old password supplied for user id={user.id}")
             return Response({"detail":"Wrong password"}, status=400)
         user.set_password(s.validated_data["new_password"])
         user.save()
+        logger.info(f"[ChangePassword] Password changed successfully for user id={user.id}")
         return Response({"detail":"Password changed"})
 
 class UserListView(generics.ListCreateAPIView):
@@ -37,6 +49,10 @@ class UserListView(generics.ListCreateAPIView):
     serializer_class = UserSerializer
     def get_permissions(self):
         return [permissions.IsAdminUser()]
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+        logger.info(f"[UserCreate] New user created: id={user.id} username={user.username} role={user.role}")
 
 @csrf_exempt
 def iclock_data(request):

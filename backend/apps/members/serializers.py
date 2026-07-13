@@ -1,9 +1,13 @@
+import logging
 from rest_framework import serializers
 from decimal import Decimal, ROUND_HALF_UP
 from .models import Diet, DietPlan, Member, MembershipPlan, MemberPayment, MemberAttendance, InstallmentPayment, TrainerAssignment, PTRenewal
 from apps.finances.gst_utils import get_gst_rate as _get_gst_rate
 from .validators import is_valid_domain, is_valid_phone
 import phonenumbers
+
+logger = logging.getLogger(__name__)
+
 def _gst_rate():
     return _get_gst_rate()
 
@@ -108,7 +112,12 @@ class MemberSerializer(serializers.ModelSerializer):
         payments   = self._payments(obj)
         total_due  = sum((p.total_with_gst for p in payments), Decimal("0"))
         total_paid = sum((p.amount_paid    for p in payments), Decimal("0"))
-        return float(total_due - total_paid)
+        balance    = total_due - total_paid
+        logger.info(
+            f"MemberSerializer.get_balance_due: member_id={obj.id} total_due={total_due} "
+            f"total_paid={total_paid} -> balance_due={balance}"
+        )
+        return float(balance)
 
     def get_member_id_display(self, obj): return obj.display_id()
     def get_plan_allows_trainer(self, obj):
@@ -162,6 +171,7 @@ class EnrollSerializer(serializers.Serializer):
     def validate_phone(self, value):
         value = is_valid_phone(value)
         if Member.objects.filter(phone=value).exists():
+            logger.warning(f"EnrollSerializer.validate_phone: rejected duplicate phone {value}")
             raise serializers.ValidationError("A member with this phone number already exists.")
         return value
 
@@ -249,6 +259,11 @@ class TrainerAssignmentSerializer(serializers.ModelSerializer):
                 fee = (fee / 30 * pt_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
         pct = get_pt_payable_percent()
         payable = (fee * pct / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        logger.info(
+            f"get_trainer_pt_amt: assignment_id={obj.id} member_id={obj.member_id} trainer_id={obj.trainer_id} "
+            f"full_amt={amt} pt_start={obj.pt_start_date} pt_end={obj.pt_end_date} prorated_fee={fee} "
+            f"pt_payable_pct={pct}% -> payable={payable}"
+        )
         return float(payable)
 
     def _latest_payment(self, obj):
@@ -313,10 +328,15 @@ class TrainerAssignmentSerializer(serializers.ModelSerializer):
         full_amt = obj.trainer.personal_trainer_amt
         if not full_amt:
             return 0.0
-        base = (Decimal(str(full_amt)) / 30 * pt_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
-        rate = get_gst_rate()
-        gst  = (base * rate / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
-        return float(base + gst)
+        base  = (Decimal(str(full_amt)) / 30 * pt_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        rate  = get_gst_rate()
+        gst   = (base * rate / 100).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        total = base + gst
+        logger.info(
+            f"get_pt_renewal_amount: assignment_id={obj.id} member_id={obj.member_id} full_amt={full_amt} "
+            f"pt_days={pt_days} base={base} gst_rate={rate}% gst={gst} -> total={total}"
+        )
+        return float(total)
 
     def get_can_renew_pt(self, obj):
         """True only when there are new PT days to cover beyond the current PT expiry."""
@@ -388,5 +408,9 @@ class TrainerAssignmentSerializer(serializers.ModelSerializer):
     def validate(self, data):
         if data.get("startingtime") and data.get("endingtime"):
             if data["startingtime"] >= data["endingtime"]:
+                logger.warning(
+                    f"TrainerAssignmentSerializer.validate: rejected — startingtime={data['startingtime']} "
+                    f">= endingtime={data['endingtime']}"
+                )
                 raise serializers.ValidationError("Start time must be before end time.")
         return data

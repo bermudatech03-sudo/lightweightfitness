@@ -93,11 +93,13 @@ def send_notification(member, trigger_type: str):
     or if the individual member has notifications turned off.
     """
     if not getattr(member, "notifications_enabled", True):
+        logger.warning(f"send_notification: skipped — notifications disabled for member {member.name!r} (trigger={trigger_type})")
         return
 
     from apps.finances.gst_utils import is_notify_enabled
     setting_key = _TRIGGER_SETTING_KEY.get(trigger_type)
     if setting_key and not is_notify_enabled(setting_key):
+        logger.warning(f"send_notification: skipped — {setting_key} is disabled (trigger={trigger_type}, member={member.name!r})")
         return
 
     template = TEMPLATES.get(trigger_type, "Hi {name}.")
@@ -111,16 +113,21 @@ def send_notification(member, trigger_type: str):
     if trigger_type in ("renewal_remind", "renewal_confirm", "enrollment", "expiry", "absent"):
         template_params = [member.name, date]
 
-    Notification.objects.create(
-        recipient_name=member.name,
-        recipient_phone=phone,
-        channel="whatsapp",
-        trigger_type=trigger_type,
-        message=body,
-        template_name=template_name,
-        template_params=template_params,
-        status="pending",
-    )
+    logger.info(f"send_notification: creating notification for {member.name!r} ({phone}), trigger={trigger_type}")
+    try:
+        Notification.objects.create(
+            recipient_name=member.name,
+            recipient_phone=phone,
+            channel="whatsapp",
+            trigger_type=trigger_type,
+            message=body,
+            template_name=template_name,
+            template_params=template_params,
+            status="pending",
+        )
+    except Exception:
+        logger.exception(f"send_notification: failed to create notification for {member.name!r} (trigger={trigger_type})")
+        raise
 
 
 def send_staff_notification(staff, trigger_type: str):
@@ -130,38 +137,49 @@ def send_staff_notification(staff, trigger_type: str):
     """
     from apps.finances.gst_utils import is_notify_enabled
     if not is_notify_enabled("NOTIFY_STAFF_ABSENT"):
+        logger.warning(f"send_staff_notification: skipped — NOTIFY_STAFF_ABSENT is disabled (staff={staff.name!r})")
         return
 
     today = str(timezone.now().date())
 
+    logger.info(f"send_staff_notification: creating self + admin notifications for staff {staff.name!r}, trigger={trigger_type}")
+
     # Staff self
     body_self = TEMPLATES["staff_absent_self"].format(name=staff.name, date=today)
-    Notification.objects.create(
-        recipient_name=staff.name,
-        recipient_phone=_normalize_phone(staff.phone),
-        channel="whatsapp",
-        trigger_type=trigger_type,
-        message=body_self,
-        template_name=TRIGGER_TEMPLATES["staff_absent_self"],
-        template_params=[staff.name, today],
-        status="pending",
-    )
+    try:
+        Notification.objects.create(
+            recipient_name=staff.name,
+            recipient_phone=_normalize_phone(staff.phone),
+            channel="whatsapp",
+            trigger_type=trigger_type,
+            message=body_self,
+            template_name=TRIGGER_TEMPLATES["staff_absent_self"],
+            template_params=[staff.name, today],
+            status="pending",
+        )
+    except Exception:
+        logger.exception(f"send_staff_notification: failed to create self notification for staff {staff.name!r}")
+        raise
 
     # Admin
     role = staff.get_role_display()
     body_admin = TEMPLATES["staff_absent_admin"].format(
         staff_name=staff.name, role=role, date=today,
     )
-    Notification.objects.create(
-        recipient_name="Admin",
-        recipient_phone=_normalize_phone(get_admin_whatsapp_number()),
-        channel="whatsapp",
-        trigger_type=trigger_type,
-        message=body_admin,
-        template_name=TRIGGER_TEMPLATES["staff_absent_admin"],
-        template_params=[staff.name, role, today],
-        status="pending",
-    )
+    try:
+        Notification.objects.create(
+            recipient_name="Admin",
+            recipient_phone=_normalize_phone(get_admin_whatsapp_number()),
+            channel="whatsapp",
+            trigger_type=trigger_type,
+            message=body_admin,
+            template_name=TRIGGER_TEMPLATES["staff_absent_admin"],
+            template_params=[staff.name, role, today],
+            status="pending",
+        )
+    except Exception:
+        logger.exception(f"send_staff_notification: failed to create admin notification for staff {staff.name!r}")
+        raise
 
 
 def send_notification_admin(item, moneyleft, trigger_type: str):
@@ -169,16 +187,21 @@ def send_notification_admin(item, moneyleft, trigger_type: str):
     date_str = str(item.BuyingDate or "")
     body = template.format(itemName=item.item_name, moneyLeft=moneyleft, date=date_str)
 
-    Notification.objects.create(
-        recipient_name=item.item_name,
-        recipient_phone=_normalize_phone(get_admin_whatsapp_number()),
-        channel="whatsapp",
-        trigger_type=trigger_type,
-        message=body,
-        template_name=TRIGGER_TEMPLATES.get(trigger_type, ""),
-        template_params=[item.item_name, str(moneyleft), date_str],
-        status="pending",
-    )
+    logger.info(f"send_notification_admin: creating notification for item {item.item_name!r}, trigger={trigger_type}")
+    try:
+        Notification.objects.create(
+            recipient_name=item.item_name,
+            recipient_phone=_normalize_phone(get_admin_whatsapp_number()),
+            channel="whatsapp",
+            trigger_type=trigger_type,
+            message=body,
+            template_name=TRIGGER_TEMPLATES.get(trigger_type, ""),
+            template_params=[item.item_name, str(moneyleft), date_str],
+            status="pending",
+        )
+    except Exception:
+        logger.exception(f"send_notification_admin: failed to create notification for item {item.item_name!r}")
+        raise
 
 
 def send_pending_payment_reminder(member):
@@ -188,25 +211,32 @@ def send_pending_payment_reminder(member):
     or if the individual member has notifications turned off.
     """
     if not getattr(member, "notifications_enabled", True):
+        logger.warning(f"send_pending_payment_reminder: skipped — notifications disabled for member {member.name!r}")
         return
 
     from apps.finances.gst_utils import is_notify_enabled
     if not is_notify_enabled(_TRIGGER_SETTING_KEY["pending_payment_member"]):
+        logger.warning(f"send_pending_payment_reminder: skipped — NOTIFY_PENDING_PAYMENT_MEMBER is disabled (member={member.name!r})")
         return
 
     balance = f"{member.balance_due():.2f}"
     body    = TEMPLATES["pending_payment_member"].format(name=member.name, balance=balance)
 
-    Notification.objects.create(
-        recipient_name  = member.name,
-        recipient_phone = _normalize_phone(member.phone),
-        channel         = "whatsapp",
-        trigger_type    = "pending_payment_member",
-        message         = body,
-        template_name   = TRIGGER_TEMPLATES["pending_payment_member"],
-        template_params = [member.name, balance],
-        status          = "pending",
-    )
+    logger.info(f"send_pending_payment_reminder: creating notification for {member.name!r}, balance=Rs.{balance}")
+    try:
+        Notification.objects.create(
+            recipient_name  = member.name,
+            recipient_phone = _normalize_phone(member.phone),
+            channel         = "whatsapp",
+            trigger_type    = "pending_payment_member",
+            message         = body,
+            template_name   = TRIGGER_TEMPLATES["pending_payment_member"],
+            template_params = [member.name, balance],
+            status          = "pending",
+        )
+    except Exception:
+        logger.exception(f"send_pending_payment_reminder: failed to create notification for {member.name!r}")
+        raise
 
 
 def send_pending_payment_admin_summary(members_with_balance):
@@ -231,13 +261,18 @@ def send_pending_payment_admin_summary(members_with_balance):
     details = "\n".join(lines)
     body    = TEMPLATES["pending_payment_admin"].format(count=count, total=total, details=details)
 
-    Notification.objects.create(
-        recipient_name  = "Admin",
-        recipient_phone = admin_phone,
-        channel         = "whatsapp",
-        trigger_type    = "pending_payment_admin",
-        message         = body,
-        template_name   = TRIGGER_TEMPLATES["pending_payment_admin"],
-        template_params = [str(count), total],
-        status          = "pending",
-    )
+    logger.info(f"send_pending_payment_admin_summary: creating admin summary notification for {count} member(s), total=Rs.{total}")
+    try:
+        Notification.objects.create(
+            recipient_name  = "Admin",
+            recipient_phone = admin_phone,
+            channel         = "whatsapp",
+            trigger_type    = "pending_payment_admin",
+            message         = body,
+            template_name   = TRIGGER_TEMPLATES["pending_payment_admin"],
+            template_params = [str(count), total],
+            status          = "pending",
+        )
+    except Exception:
+        logger.exception("send_pending_payment_admin_summary: failed to create admin summary notification")
+        raise

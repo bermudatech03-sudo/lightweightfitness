@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -7,14 +8,17 @@ from django.utils import timezone
 from .models import Enquiry, EnquiryFollowup
 from .serializers import EnquirySerializer
 
+logger = logging.getLogger(__name__)
+
 
 def _schedule_followups(enquiry):
     """Create 10 follow-up records: every 3 days for 30 days (day 3,6,...,30)."""
     base = timezone.localdate()
-    EnquiryFollowup.objects.bulk_create([
+    followups = EnquiryFollowup.objects.bulk_create([
         EnquiryFollowup(enquiry=enquiry, scheduled_date=base + timedelta(days=3 * i))
         for i in range(1, 11)   # day 3, 6, 9 … 30
     ])
+    logger.info(f"Scheduled {len(followups)} follow-ups for enquiry {enquiry.pk} ({enquiry.name})")
 
 
 def _send_welcome(enquiry):
@@ -32,6 +36,8 @@ def _send_welcome(enquiry):
         f"We'd love to help you start your fitness journey. "
         f"Feel free to call us at {gym_phone} for more details. See you soon!"
     )
+
+    logger.info(f"Sending welcome message to enquiry {enquiry.pk} ({enquiry.name}) at phone {phone}")
 
     Notification.objects.create(
         recipient_name=enquiry.name,
@@ -53,11 +59,12 @@ class EnquiryViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         enquiry = serializer.save()
+        logger.info(f"Enquiry {enquiry.pk} created: name={enquiry.name}, phone={enquiry.phone}")
         _schedule_followups(enquiry)
         try:
             _send_welcome(enquiry)
         except Exception:
-            pass
+            logger.exception(f"Welcome message failed for enquiry {enquiry.pk} ({enquiry.name}) — continuing without blocking enquiry creation")
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"])
@@ -70,4 +77,5 @@ class EnquiryViewSet(viewsets.ModelViewSet):
             converted=Count("id", filter=Q(status="converted")),
             lost=Count("id", filter=Q(status="lost")),
         )
+        logger.info(f"Enquiry counts requested: {agg}")
         return Response(agg)

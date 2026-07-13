@@ -1,3 +1,4 @@
+import logging
 from rest_framework import viewsets
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -8,6 +9,8 @@ from .models import Income, Expenditure, GymSetting
 from .serializers import IncomeSerializer, ExpenditureSerializer
 from .gst_utils import get_gst_rate, get_gym_info
 
+logger = logging.getLogger(__name__)
+
 
 class IncomeViewSet(viewsets.ModelViewSet):
     queryset         = Income.objects.all()
@@ -15,6 +18,27 @@ class IncomeViewSet(viewsets.ModelViewSet):
     filterset_fields = ["category","date"]
     ordering_fields  = ["date","amount"]
     search_fields    = ["source","notes","invoice_number"]
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        logger.info(
+            f"Income created: id={instance.id} source={instance.source} category={instance.category} "
+            f"base_amount={instance.base_amount} gst_rate={instance.gst_rate} gst_amount={instance.gst_amount} "
+            f"total_amount={instance.amount} date={instance.date} invoice_number={instance.invoice_number}"
+        )
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        logger.info(
+            f"Income updated: id={instance.id} base_amount={instance.base_amount} gst_amount={instance.gst_amount} "
+            f"total_amount={instance.amount} date={instance.date} invoice_number={instance.invoice_number}"
+        )
+
+    def perform_destroy(self, instance):
+        logger.info(
+            f"Income deleted: id={instance.id} source={instance.source} total_amount={instance.amount} date={instance.date}"
+        )
+        instance.delete()
 
 
 class ExpenditureViewSet(viewsets.ModelViewSet):
@@ -24,12 +48,32 @@ class ExpenditureViewSet(viewsets.ModelViewSet):
     ordering_fields  = ["date","amount"]
     search_fields    = ["description","vendor"]
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        logger.info(
+            f"Expenditure created: id={instance.id} category={instance.category} amount={instance.amount} "
+            f"date={instance.date} vendor={instance.vendor}"
+        )
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        logger.info(
+            f"Expenditure updated: id={instance.id} category={instance.category} amount={instance.amount} date={instance.date}"
+        )
+
+    def perform_destroy(self, instance):
+        logger.info(
+            f"Expenditure deleted: id={instance.id} category={instance.category} amount={instance.amount} date={instance.date}"
+        )
+        instance.delete()
+
 
 class FinanceSummaryView(APIView):
     def get(self, request):
         today = timezone.localdate()
         year  = int(request.query_params.get("year",  today.year))
         month = int(request.query_params.get("month", today.month))
+        logger.info(f"FinanceSummaryView.get: computing finance summary for year={year} month={month}")
         yearlyinc = Income.objects.filter(date__year=year)
         inc = Income.objects.filter(date__year=year, date__month=month)
         exp = Expenditure.objects.filter(date__year=year, date__month=month)
@@ -41,7 +85,15 @@ class FinanceSummaryView(APIView):
         all_expense     = Expenditure.objects.aggregate(t=Sum("amount"))["t"] or 0
         net_savings     = all_base_income - all_expense
         yearly_income  =  yearlyinc.aggregate(t=Sum("base_amount"))["t"] or 0
-        
+        logger.info(
+            f"FinanceSummaryView: month totals year={year} month={month} total_income={total_income} "
+            f"total_base_income={total_base} total_gst_collected={total_gst} total_expense={total_expense}"
+        )
+        logger.info(
+            f"FinanceSummaryView: savings calc all_base_income={all_base_income} - all_expense={all_expense} "
+            f"-> net_savings={net_savings}"
+        )
+
         # 12-month trend
         monthly = []
         for i in range(11, -1, -1):
@@ -90,41 +142,56 @@ class FinanceSummaryView(APIView):
         first_of_month = _dt.date(year, month, 1)
         carryover_total = carryover_base = carryover_gst = 0
 
-        # MemberPayments from before this month with pending balance
-        for mp in MemberPayment.objects.filter(paid_date__lt=first_of_month):
-            collected_before = float(mp.installment_payments.filter(
-                paid_date__lt=first_of_month
-            ).aggregate(t=Sum("amount"))["t"] or 0)
-            pending = float(mp.total_with_gst) - collected_before
-            if pending > 0.01:
-                gst = float(mp.gst_amount)
-                pending_gst = max(gst - collected_before, 0)
-                pending_base = pending - pending_gst
-                carryover_total += pending
-                carryover_base += pending_base
-                carryover_gst += pending_gst
+        try:
+            # MemberPayments from before this month with pending balance
+            for mp in MemberPayment.objects.filter(paid_date__lt=first_of_month):
+                collected_before = float(mp.installment_payments.filter(
+                    paid_date__lt=first_of_month
+                ).aggregate(t=Sum("amount"))["t"] or 0)
+                pending = float(mp.total_with_gst) - collected_before
+                if pending > 0.01:
+                    gst = float(mp.gst_amount)
+                    pending_gst = max(gst - collected_before, 0)
+                    pending_base = pending - pending_gst
+                    carryover_total += pending
+                    carryover_base += pending_base
+                    carryover_gst += pending_gst
 
-        # PTRenewals from before this month with pending balance
-        for ptr in PTRenewal.objects.filter(paid_date__lt=first_of_month):
-            if not ptr.invoice_number:
-                continue
-            collected_before = float(Income.objects.filter(
-                invoice_number=ptr.invoice_number, date__lt=first_of_month
-            ).aggregate(t=Sum("amount"))["t"] or 0)
-            pending = float(ptr.total_amount) - collected_before
-            if pending > 0.01:
-                gst = float(ptr.gst_amount)
-                pending_gst = max(gst - collected_before, 0)
-                pending_base = pending - pending_gst
-                carryover_total += pending
-                carryover_base += pending_base
-                carryover_gst += pending_gst
+            # PTRenewals from before this month with pending balance
+            for ptr in PTRenewal.objects.filter(paid_date__lt=first_of_month):
+                if not ptr.invoice_number:
+                    continue
+                collected_before = float(Income.objects.filter(
+                    invoice_number=ptr.invoice_number, date__lt=first_of_month
+                ).aggregate(t=Sum("amount"))["t"] or 0)
+                pending = float(ptr.total_amount) - collected_before
+                if pending > 0.01:
+                    gst = float(ptr.gst_amount)
+                    pending_gst = max(gst - collected_before, 0)
+                    pending_base = pending - pending_gst
+                    carryover_total += pending
+                    carryover_base += pending_base
+                    carryover_gst += pending_gst
+        except Exception:
+            logger.exception(
+                f"FinanceSummaryView: error computing carryover pending balances for year={year} month={month}"
+            )
+            raise
 
         total_income_to_collect = float(mp_total) + float(pt_total) + carryover_total
         total_base_income_to_collect = float(mp_base) + float(pt_base) + carryover_base
         total_gst_to_collect = float(mp_gst) + float(pt_gst) + carryover_gst
+        logger.info(
+            f"FinanceSummaryView: to-collect totals year={year} month={month} "
+            f"total_income_to_collect={total_income_to_collect} total_base_income_to_collect={total_base_income_to_collect} "
+            f"total_gst_to_collect={total_gst_to_collect} carryover_total={carryover_total}"
+        )
 
         outstanding = membership_outstanding + pt_renewal_outstanding
+        logger.info(
+            f"FinanceSummaryView: outstanding_balance={outstanding} "
+            f"membership_outstanding={membership_outstanding} pt_renewal_outstanding={pt_renewal_outstanding}"
+        )
         return Response({
             "month": month, "year": year,
             "total_income":         float(total_income),
@@ -154,6 +221,7 @@ class MonthlyReportView(APIView):
         today = timezone.localdate()
         year  = int(request.query_params.get("year",  today.year))
         month = int(request.query_params.get("month", today.month))
+        logger.info(f"MonthlyReportView.get: generating GST/monthly report for year={year} month={month}")
 
         incomes  = Income.objects.filter(date__year=year, date__month=month).order_by("date")
         expenses = Expenditure.objects.filter(date__year=year, date__month=month).order_by("date")
@@ -163,6 +231,11 @@ class MonthlyReportView(APIView):
         total_gst      = incomes.aggregate(t=Sum("gst_amount"))["t"] or 0
 
         total_income_without_gst = total_income - total_gst
+        logger.info(
+            f"MonthlyReportView: raw aggregates year={year} month={month} total_income={total_income} "
+            f"total_gst(raw_aggregate)={total_gst} total_expense={total_expense} "
+            f"total_income_without_gst={total_income_without_gst}"
+        )
 
         gym = get_gym_info()
 
@@ -250,6 +323,10 @@ class MonthlyReportView(APIView):
         # Summary totals derived from merged rows (plan-level, not installment-level)
         total_base = sum(r["base_amount"] for r in merged_incomes)
         total_gst  = sum(r["gst_amount"]  for r in merged_incomes)
+        logger.info(
+            f"MonthlyReportView: merged-row totals year={year} month={month} total_base={total_base} "
+            f"total_gst(merged)={total_gst} merged_income_rows={len(merged_incomes)}"
+        )
 
         # --- "To be collected" for the selected month ---
         # 1) Invoices created this month
@@ -268,39 +345,55 @@ class MonthlyReportView(APIView):
         first_of_month = _dt.date(year, month, 1)
         carryover_total = carryover_base = carryover_gst = 0
 
-        for mp in _MemberPayment.objects.filter(paid_date__lt=first_of_month):
-            collected_before = float(mp.installment_payments.filter(
-                paid_date__lt=first_of_month
-            ).aggregate(t=Sum("amount"))["t"] or 0)
-            pending = float(mp.total_with_gst) - collected_before
-            if pending > 0.01:
-                gst = float(mp.gst_amount)
-                # GST is paid first; determine how much base & GST are still pending
-                pending_gst = max(gst - collected_before, 0)
-                pending_base = pending - pending_gst
-                carryover_total += pending
-                carryover_base += pending_base
-                carryover_gst += pending_gst
+        try:
+            for mp in _MemberPayment.objects.filter(paid_date__lt=first_of_month):
+                collected_before = float(mp.installment_payments.filter(
+                    paid_date__lt=first_of_month
+                ).aggregate(t=Sum("amount"))["t"] or 0)
+                pending = float(mp.total_with_gst) - collected_before
+                if pending > 0.01:
+                    gst = float(mp.gst_amount)
+                    # GST is paid first; determine how much base & GST are still pending
+                    pending_gst = max(gst - collected_before, 0)
+                    pending_base = pending - pending_gst
+                    carryover_total += pending
+                    carryover_base += pending_base
+                    carryover_gst += pending_gst
 
-        for ptr in PTRenewal.objects.filter(paid_date__lt=first_of_month):
-            if not ptr.invoice_number:
-                continue
-            collected_before = float(Income.objects.filter(
-                invoice_number=ptr.invoice_number, date__lt=first_of_month
-            ).aggregate(t=Sum("amount"))["t"] or 0)
-            pending = float(ptr.total_amount) - collected_before
-            if pending > 0.01:
-                gst = float(ptr.gst_amount)
-                # GST is paid first; determine how much base & GST are still pending
-                pending_gst = max(gst - collected_before, 0)
-                pending_base = pending - pending_gst
-                carryover_total += pending
-                carryover_base += pending_base
-                carryover_gst += pending_gst
+            for ptr in PTRenewal.objects.filter(paid_date__lt=first_of_month):
+                if not ptr.invoice_number:
+                    continue
+                collected_before = float(Income.objects.filter(
+                    invoice_number=ptr.invoice_number, date__lt=first_of_month
+                ).aggregate(t=Sum("amount"))["t"] or 0)
+                pending = float(ptr.total_amount) - collected_before
+                if pending > 0.01:
+                    gst = float(ptr.gst_amount)
+                    # GST is paid first; determine how much base & GST are still pending
+                    pending_gst = max(gst - collected_before, 0)
+                    pending_base = pending - pending_gst
+                    carryover_total += pending
+                    carryover_base += pending_base
+                    carryover_gst += pending_gst
+        except Exception:
+            logger.exception(
+                f"MonthlyReportView: error computing carryover pending balances for year={year} month={month}"
+            )
+            raise
 
         total_income_to_collect = float(membership_income_to_collect) + float(personal_trainer_income_to_collect) + carryover_total
         total_base_income_to_collect = float(membership_base_income_to_collect) + float(personal_trainer_base_income_to_collect) + carryover_base
         total_gst_to_collect = float(membership_gst_to_collect) + float(personal_trainer_gst_to_collect) + carryover_gst
+        logger.info(
+            f"MonthlyReportView: to-collect totals year={year} month={month} "
+            f"total_income_to_collect={total_income_to_collect} total_base_income_to_collect={total_base_income_to_collect} "
+            f"total_gst_to_collect={total_gst_to_collect} carryover_total={carryover_total}"
+        )
+        logger.info(
+            f"MonthlyReportView: final report totals year={year} month={month} "
+            f"total_income_collected={total_income} total_base={total_base} total_gst_collected={total_gst} "
+            f"total_expense={total_expense} net={total_income - total_expense}"
+        )
         return Response({
             "gym":           gym,
             "month":         month,
@@ -322,14 +415,18 @@ class MonthlyReportView(APIView):
 
 class GSTRateView(APIView):
     def get(self, request):
-        return Response({"gst_rate": float(get_gst_rate())})
+        rate = get_gst_rate()
+        logger.info(f"GSTRateView.get: returning gst_rate={float(rate)}")
+        return Response({"gst_rate": float(rate)})
 
 
 class GymSettingsView(APIView):
     def get(self, request):
+        logger.info("GymSettingsView.get: fetching all gym settings")
         return Response({s.key: s.value for s in GymSetting.objects.all()})
 
     def patch(self, request):
+        logger.info(f"GymSettingsView.patch: updating settings keys={list(request.data.keys())}")
         for key, value in request.data.items():
             GymSetting.objects.update_or_create(key=key, defaults={"value": str(value)})
         return Response({s.key: s.value for s in GymSetting.objects.all()})
@@ -358,6 +455,7 @@ class ToBuyView(APIView):
         from .models import ToBuy
         data = request.data
         if not data.get("item_name"):
+            logger.warning("ToBuyView.post: rejected — item_name is required")
             return Response({"error": "item_name is required"}, status=400)
         item = ToBuy.objects.create(
             item_name=data["item_name"],
@@ -369,6 +467,7 @@ class ToBuyView(APIView):
             notes=data.get("notes", ""),
             item_url=data.get("item_url", ""),
         )
+        logger.info(f"ToBuyView.post: created item id={item.id} item_name={item.item_name} price={item.price}")
         return Response(self._serialize(item), status=201)
 
     def put(self, request):
@@ -376,10 +475,12 @@ class ToBuyView(APIView):
         data = request.data
         item_id = data.get("id")
         if not item_id:
+            logger.warning("ToBuyView.put: rejected — ID is required for update")
             return Response({"error": "ID is required for update"}, status=400)
         try:
             item = ToBuy.objects.get(id=item_id)
         except ToBuy.DoesNotExist:
+            logger.warning(f"ToBuyView.put: item not found id={item_id}")
             return Response({"error": "Item not found"}, status=404)
         item.item_name = data.get("item_name", item.item_name)
         item.quantity  = data.get("quantity",  item.quantity)
@@ -391,29 +492,41 @@ class ToBuyView(APIView):
         item.item_url  = data.get("item_url",  item.item_url)
         item.save()
         print("Updated To-Buy item:", item.id, item.item_name, "Status:", item.status)
+        logger.info(f"ToBuyView.put: updated item id={item.id} item_name={item.item_name} status={item.status} price={item.price}")
         if item.status == "purchased":
             print("Expected to create expenditure for purchased item.")
-            Expenditure.objects.create(
+            expenditure = Expenditure.objects.create(
                 amount=item.price or 0,
                 category="to-buy",
                 description=item.item_name,
                 date=timezone.localdate(),
                 notes=f"Auto-generated from To-Buy list item ID {item.id}"
             )
+            logger.info(
+                f"ToBuyView.put: auto-created Expenditure id={expenditure.id} amount={expenditure.amount} "
+                f"for purchased ToBuy item id={item.id}"
+            )
             all_base_income = Income.objects.aggregate(t=Sum("base_amount"))["t"] or 0
             all_expense     = Expenditure.objects.aggregate(t=Sum("amount"))["t"] or 0
             net_savings     = all_base_income - all_expense
+            logger.info(
+                f"ToBuyView.put: savings recalc after purchase all_base_income={all_base_income} "
+                f"all_expense={all_expense} -> net_savings={net_savings}"
+            )
         return Response(self._serialize(item))
 
     def delete(self, request):
         from .models import ToBuy
         item_id = request.query_params.get("id")
         if not item_id:
+            logger.warning("ToBuyView.delete: rejected — ID is required")
             return Response({"error": "ID is required"}, status=400)
         try:
             ToBuy.objects.get(id=item_id).delete()
+            logger.info(f"ToBuyView.delete: deleted item id={item_id}")
             return Response({"deleted": True})
         except ToBuy.DoesNotExist:
+            logger.warning(f"ToBuyView.delete: item not found id={item_id}")
             return Response({"error": "Item not found"}, status=404)
 
 
@@ -426,18 +539,25 @@ class CanAffordView(APIView):
         month   = int(request.query_params.get("month", today.month))
 
         if not item_id:
+            logger.warning("CanAffordView.get: rejected — id is required")
             return Response({"error": "id is required"}, status=400)
         try:
             item = ToBuy.objects.get(id=item_id)
         except ToBuy.DoesNotExist:
+            logger.warning(f"CanAffordView.get: item not found id={item_id}")
             return Response({"error": "Item not found"}, status=404)
 
         income      = Income.objects.aggregate(t=Sum("base_amount"))["t"] or 0
         expenditure = Expenditure.objects.aggregate(t=Sum("amount"))["t"] or 0
         money_left  = income - expenditure
+        can_buy     = money_left >= (item.price or 0)
+        logger.info(
+            f"CanAffordView.get: item_id={item_id} item_price={item.price} total_income={income} "
+            f"total_expenditure={expenditure} -> money_left={money_left} can_buy={can_buy}"
+        )
 
         return Response({
-            "can_buy":    money_left >= (item.price or 0),
+            "can_buy":    can_buy,
             "money_left": float(money_left),
             "item_price": float(item.price) if item.price else None,
             "month":      month,

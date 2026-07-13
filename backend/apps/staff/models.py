@@ -2,6 +2,9 @@ from django.db import models
 from django.utils import timezone
 from datetime import datetime, timedelta
 import datetime as dt
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Day-of-week choices (0=Mon … 6=Sun) ────────────────────────────────────
@@ -160,54 +163,71 @@ class StaffAttendance(models.Model):
 
     def save(self, *args, **kwargs):
         shift = self.staff.get_shift_template()
-        if shift and self.check_in:
-            base      = dt.date.today()
-            ci        = datetime.combine(base, self.check_in)
-            st        = datetime.combine(base, shift.start_time)
-            et        = datetime.combine(base, shift.end_time)
-            if et < st:
-                et += timedelta(days=1)    # overnight shift
+        try:
+            if shift and self.check_in:
+                base      = dt.date.today()
+                ci        = datetime.combine(base, self.check_in)
+                st        = datetime.combine(base, shift.start_time)
+                et        = datetime.combine(base, shift.end_time)
+                if et < st:
+                    et += timedelta(days=1)    # overnight shift
 
-            # Late: trigger only if check_in exceeds grace window,
-            # but measure from shift START (not from grace end)
-            grace_end = st + timedelta(minutes=shift.late_grace_minutes)
-            if ci > grace_end:
-                self.late_minutes = int((ci - st).total_seconds() / 60)
-            else:
-                self.late_minutes = 0
-
-            if self.check_out:
-                co = datetime.combine(base, self.check_out)
-                if co < ci:
-                    co += timedelta(days=1)
-                self.worked_minutes = int((co - ci).total_seconds() / 60)
-                # OT: trigger only if check_out exceeds threshold window,
-                # but measure from shift END (not from threshold point)
-                ot_start = et + timedelta(minutes=shift.overtime_threshold_minutes)
-                if co > ot_start:
-                    self.overtime_minutes = int((co - et).total_seconds() / 60)
+                # Late: trigger only if check_in exceeds grace window,
+                # but measure from shift START (not from grace end)
+                grace_end = st + timedelta(minutes=shift.late_grace_minutes)
+                if ci > grace_end:
+                    self.late_minutes = int((ci - st).total_seconds() / 60)
                 else:
+                    self.late_minutes = 0
+
+                if self.check_out:
+                    co = datetime.combine(base, self.check_out)
+                    if co < ci:
+                        co += timedelta(days=1)
+                    self.worked_minutes = int((co - ci).total_seconds() / 60)
+                    # OT: trigger only if check_out exceeds threshold window,
+                    # but measure from shift END (not from threshold point)
+                    ot_start = et + timedelta(minutes=shift.overtime_threshold_minutes)
+                    if co > ot_start:
+                        self.overtime_minutes = int((co - et).total_seconds() / 60)
+                    else:
+                        self.overtime_minutes = 0
+                else:
+                    self.worked_minutes   = 0
                     self.overtime_minutes = 0
-            else:
-                self.worked_minutes   = 0
-                self.overtime_minutes = 0
 
-            # Auto-derive status — only if not admin-forced
-            if self.status not in ("absent", "half", "leave", "auto_absent"):
-                if self.overtime_minutes > 0 and self.late_minutes > 0:
-                    self.status = "late_overtime"
-                elif self.overtime_minutes > 0:
-                    self.status = "overtime"
-                elif self.late_minutes > 0:
-                    self.status = "late"
-                else:
-                    self.status = "present"
-        else:
-            # No check_in (absent/leave) — reset all computed fields
-            if not self.check_in:
-                self.worked_minutes   = 0
-                self.late_minutes     = 0
-                self.overtime_minutes = 0
+                # Auto-derive status — only if not admin-forced
+                if self.status not in ("absent", "half", "leave", "auto_absent"):
+                    if self.overtime_minutes > 0 and self.late_minutes > 0:
+                        self.status = "late_overtime"
+                    elif self.overtime_minutes > 0:
+                        self.status = "overtime"
+                    elif self.late_minutes > 0:
+                        self.status = "late"
+                    else:
+                        self.status = "present"
+
+                logger.info(
+                    f"StaffAttendance.save calc: staff={self.staff_id} date={self.date} "
+                    f"shift={shift.name} check_in={self.check_in} check_out={self.check_out} "
+                    f"late_minutes={self.late_minutes} worked_minutes={self.worked_minutes} "
+                    f"overtime_minutes={self.overtime_minutes} -> status={self.status}"
+                )
+            else:
+                # No check_in (absent/leave) — reset all computed fields
+                if not self.check_in:
+                    self.worked_minutes   = 0
+                    self.late_minutes     = 0
+                    self.overtime_minutes = 0
+                logger.info(
+                    f"StaffAttendance.save: staff={self.staff_id} date={self.date} "
+                    f"no check_in/shift (shift={'set' if shift else 'none'}) -> status={self.status}"
+                )
+        except Exception:
+            logger.exception(
+                f"StaffAttendance.save: calculation failed for staff={self.staff_id} date={self.date}"
+            )
+            raise
 
         # Django's update_or_create passes update_fields=defaults.keys(), which
         # excludes our computed columns.  Force them in so they're always written.

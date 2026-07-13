@@ -1,6 +1,9 @@
+import logging
 from django.db import models
 from django.utils import timezone
 from django.core.validators import MinValueValidator
+
+logger = logging.getLogger(__name__)
 
 INCOME_CATEGORIES = [
     ("membership","Membership Fee"),
@@ -37,6 +40,26 @@ class Income(models.Model):
     class Meta:
         ordering = ["-date"]
 
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        logger.info(
+            f"Income.save: {'creating' if is_new else 'updating'} id={self.pk} source={self.source} "
+            f"category={self.category} base_amount={self.base_amount} gst_rate={self.gst_rate} "
+            f"gst_amount={self.gst_amount} amount={self.amount} date={self.date} invoice_number={self.invoice_number}"
+        )
+        try:
+            if self.base_amount is not None and self.gst_amount is not None and self.amount is not None:
+                expected = self.base_amount + self.gst_amount
+                if abs(expected - self.amount) > 0.01:
+                    logger.warning(
+                        f"Income.save: possible mis-calculation for id={self.pk} invoice_number={self.invoice_number} "
+                        f"base_amount={self.base_amount} + gst_amount={self.gst_amount} = {expected} "
+                        f"but amount={self.amount} (diff={self.amount - expected})"
+                    )
+        except Exception:
+            logger.exception(f"Income.save: error while sanity-checking GST totals for id={self.pk}")
+        super().save(*args, **kwargs)
+
 class Expenditure(models.Model):
     category    = models.CharField(max_length=30, choices=EXPENSE_CATEGORIES, default="other")
     description = models.CharField(max_length=255)
@@ -49,6 +72,14 @@ class Expenditure(models.Model):
     class Meta:
         ordering = ["-date"]
 
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        logger.info(
+            f"Expenditure.save: {'creating' if is_new else 'updating'} id={self.pk} category={self.category} "
+            f"amount={self.amount} date={self.date} vendor={self.vendor}"
+        )
+        super().save(*args, **kwargs)
+
 class GymSetting(models.Model):
     """
     Key-value store for gym-wide configuration.
@@ -58,6 +89,15 @@ class GymSetting(models.Model):
     value      = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    _SENSITIVE_KEY_MARKERS = ("password", "secret", "token", "api_key", "apikey")
+
+    def save(self, *args, **kwargs):
+        if any(m in self.key.lower() for m in self._SENSITIVE_KEY_MARKERS):
+            logger.info(f"GymSetting.save: key={self.key} value=[REDACTED]")
+        else:
+            logger.info(f"GymSetting.save: key={self.key} value={self.value}")
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.key} = {self.value}"

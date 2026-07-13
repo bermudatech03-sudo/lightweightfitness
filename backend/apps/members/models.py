@@ -1,8 +1,11 @@
+import logging
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
+
+logger = logging.getLogger(__name__)
 
 class MembershipPlan(models.Model):
     name          = models.CharField(max_length=100)
@@ -65,6 +68,7 @@ class Member(models.Model):
             from django.db.models import Sum
             result = self.payments.aggregate(t=Sum("amount_paid"))["t"]
             self._total_paid_cache = result or 0
+            logger.info(f"Member {self.id} ({self.name}): total_paid computed = {self._total_paid_cache}")
         return self._total_paid_cache
 
     def total_due(self):
@@ -72,17 +76,29 @@ class Member(models.Model):
             from django.db.models import Sum
             result = self.payments.aggregate(t=Sum("total_with_gst"))["t"]
             self._total_due_cache = result or 0
+            logger.info(f"Member {self.id} ({self.name}): total_due computed = {self._total_due_cache}")
         return self._total_due_cache
 
     def balance_due(self):
-        return self.total_due() - self.total_paid()
+        due  = self.total_due()
+        paid = self.total_paid()
+        balance = due - paid
+        logger.info(f"Member {self.id} ({self.name}): balance_due = total_due({due}) - total_paid({paid}) = {balance}")
+        return balance
 
     def renew(self):
         if self.plan:
+            old_renewal_date = self.renewal_date
             base = max(self.renewal_date, timezone.localdate()) if self.renewal_date else timezone.localdate()
             self.renewal_date = base + timedelta(days=self.plan.duration_days)
             self.status = "active"
             self.save()
+            logger.info(
+                f"Member {self.id} ({self.name}): renew() renewal_date {old_renewal_date} -> {self.renewal_date} "
+                f"(plan={self.plan.name}, duration_days={self.plan.duration_days}), status set to active"
+            )
+        else:
+            logger.warning(f"Member {self.id} ({self.name}): renew() called but member has no plan — renewal_date unchanged")
 
     def display_id(self):
         return f"M{self.id:04d}"
@@ -93,7 +109,13 @@ class Member(models.Model):
         if self.personal_trainer:
             assignment = self.trainer_assignments.select_related("trainer").first()
             if assignment and assignment.trainer.personal_trainer_amt:
-                return self.plan.price + assignment.trainer.personal_trainer_amt
+                total = self.plan.price + assignment.trainer.personal_trainer_amt
+                logger.info(
+                    f"Member {self.id} ({self.name}): change_amount = plan.price({self.plan.price}) "
+                    f"+ trainer_pt_amt({assignment.trainer.personal_trainer_amt}) = {total}"
+                )
+                return total
+        logger.info(f"Member {self.id} ({self.name}): change_amount = plan.price = {self.plan.price} (no PT fee applied)")
         return self.plan.price
 
 class MemberPayment(models.Model):
@@ -145,6 +167,10 @@ class MemberPayment(models.Model):
             self.status = "partial"
         else:
             self.status = "pending"
+        logger.info(
+            f"MemberPayment save: id={self.id} member_id={self.member_id} invoice={self.invoice_number} "
+            f"total_with_gst={self.total_with_gst} amount_paid={self.amount_paid} -> balance={self.balance} status={self.status}"
+        )
         super().save(*args, **kwargs)
 
     def add_installment(self, amount, paid_date=None, notes="", installment_type="balance"):
@@ -166,6 +192,10 @@ class MemberPayment(models.Model):
         inst.balance_after = max(self.total_with_gst - self.amount_paid, Decimal("0"))
         inst.save()
         self.save()   # triggers balance / status recalc
+        logger.info(
+            f"MemberPayment {self.id} (member_id={self.member_id}): add_installment amount={amount} "
+            f"type={installment_type} -> amount_paid={self.amount_paid} balance_after={inst.balance_after}"
+        )
         return inst
     
 class MemberAttendance(models.Model):
@@ -285,6 +315,10 @@ class TrainerAssignment(models.Model):
 
     def clean(self):
         if self.startingtime >= self.endingtime:
+            logger.warning(
+                f"TrainerAssignment validation failed: member_id={self.member_id} trainer_id={self.trainer_id} "
+                f"startingtime={self.startingtime} >= endingtime={self.endingtime}"
+            )
             raise ValidationError("Start time must be before end time")
 
     @property

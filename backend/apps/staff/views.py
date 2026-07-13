@@ -10,6 +10,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta, time
 import datetime as dt
 import calendar
+import logging
 from apps.notifications.utils import send_staff_notification
 
 from .models import StaffMember, StaffShift, StaffAttendance, StaffPayment
@@ -17,12 +18,19 @@ from .serializers import (
     StaffSerializer, AttendanceSerializer, PaymentSerializer, StaffShiftSerializer
 )
 
+logger = logging.getLogger(__name__)
+
 
 # ─── Salary → Finance helper ─────────────────────────────────────────────────
 
 def _record_expense(staff, amount, month, paid_date):
     from apps.finances.models import Expenditure
     month_name = calendar.month_name[month.month]
+    logger.info(
+        f"_record_expense: staff={staff.id} ({staff.name}) amount={amount} "
+        f"salary_month={month_name} {month.year} paid_date={paid_date} "
+        f"-> finance will attribute this expense to paid_date's month/day"
+    )
 
     # Recalculate att_pct just for the label
     days, counts = _build_staff_calendar(staff, month.year, month.month)
@@ -33,8 +41,12 @@ def _record_expense(staff, amount, month, paid_date):
         + counts.get("half", 0) * 0.5
     )
     att_pct = round(days_present / working_days * 100, 1) if working_days > 0 else 0
+    logger.info(
+        f"_record_expense: staff={staff.id} salary_month={month_name} {month.year} "
+        f"working_days={working_days} days_present={days_present} att_pct={att_pct}%"
+    )
 
-    Expenditure.objects.create(
+    exp = Expenditure.objects.create(
         category="salary",
         description=f"Salary — {staff.name} ({month_name} {month.year}) [{att_pct}% attendance]",
         amount=amount,
@@ -45,17 +57,25 @@ def _record_expense(staff, amount, month, paid_date):
             f"| Base: ₹{staff.salary} | Attendance: {att_pct}% | Payable: ₹{amount}"
         ),
     )
+    logger.info(
+        f"_record_expense: created Expenditure id={exp.id} staff={staff.id} amount={amount} "
+        f"date={paid_date} (finance month={paid_date.month}/{paid_date.year})"
+    )
 
 
 def _delete_expense(staff, month):
     from apps.finances.models import Expenditure
     month_name = calendar.month_name[month.month]
     # Match by notes (correct month label) OR by date in that month (catches legacy records)
-    Expenditure.objects.filter(
+    deleted_count, _ = Expenditure.objects.filter(
         category="salary",
         vendor=staff.name,
         description__icontains=f"Salary — {staff.name} ({month_name} {month.year})",
     ).delete()
+    logger.info(
+        f"_delete_expense: staff={staff.id} ({staff.name}) salary_month={month_name} {month.year} "
+        f"deleted_count={deleted_count}"
+    )
 
 
 # ─── Auto-absent helpers ─────────────────────────────────────────────────────
@@ -89,6 +109,10 @@ def _auto_mark_absent_staff():
             defaults={"status": "auto_absent", "notes": "Auto-marked absent"},
         )
         if created:
+            logger.info(
+                f"_auto_mark_absent_staff: staff={staff.id} ({staff.name}) auto-marked absent "
+                f"for date={today} (shift={shift.name if shift else 'none'})"
+            )
             send_staff_notification(staff,"staff_absent")
 
 
@@ -101,6 +125,7 @@ def _auto_mark_absent_members():
     from apps.members.models import Member, MemberAttendance
     yesterday = timezone.localdate() - timedelta(days=1)
     members   = list(Member.objects.filter(status__in=["active", "expired"]))
+    logger.info(f"_auto_mark_absent_members: backfilling up to date={yesterday} for {len(members)} member(s)")
     for member in members:
         # Backfill from join_date up to yesterday for any missing day
         start = max(member.join_date, yesterday)   # only do yesterday for perf
@@ -182,6 +207,17 @@ def _build_staff_calendar(staff, year, month_num):
     # Total scheduled hours for the month = working_days × shift_duration
     counts["total_scheduled_minutes"] = counts["working_days"] * shift_day_mins
 
+    logger.info(
+        f"_build_staff_calendar: staff={staff.id} ({staff.name}) year={year} month={month_num} "
+        f"shift={shift.name if shift else 'none'} working_days={counts['working_days']} "
+        f"present={counts.get('present',0)} absent={counts.get('absent',0)} "
+        f"late={counts.get('late',0)} overtime={counts.get('overtime',0)} "
+        f"half={counts.get('half',0)} leave={counts.get('leave',0)} "
+        f"auto_absent={counts.get('auto_absent',0)} "
+        f"total_worked_minutes={counts['total_worked_minutes']} "
+        f"total_scheduled_minutes={counts['total_scheduled_minutes']}"
+    )
+
     return days, counts
 
 
@@ -237,6 +273,10 @@ def _build_member_calendar(member, year, month_num):
             "attendance_id":  rec.id if rec else None,
         })
 
+    logger.info(
+        f"_build_member_calendar: member={member.id} ({member.name}) year={year} month={month_num} "
+        f"present={counts.get('present',0)} absent={counts.get('absent',0)}"
+    )
     return days, counts
 
 
@@ -249,9 +289,11 @@ class StaffShiftViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         shift = self.get_object()
+        logger.info(f"StaffShiftViewSet.destroy: shift={shift.id} ({shift.name})")
         # Unlink staff before deleting
-        StaffMember.objects.filter(shift_template=shift).update(shift_template=None)
+        unlinked = StaffMember.objects.filter(shift_template=shift).update(shift_template=None)
         shift.delete()
+        logger.info(f"StaffShiftViewSet.destroy: shift={shift.id} deleted, unlinked {unlinked} staff member(s)")
         return Response({"detail": "Shift deleted."}, status=204)
 
 
@@ -260,6 +302,24 @@ class StaffViewSet(viewsets.ModelViewSet):
     serializer_class = StaffSerializer
     search_fields    = ["name", "phone", "email"]
     filterset_fields = ["role", "shift", "status"]
+
+    def perform_create(self, serializer):
+        staff = serializer.save()
+        logger.info(
+            f"StaffViewSet.create: staff={staff.id} ({staff.name}) role={staff.role} "
+            f"shift={staff.shift} salary={staff.salary} status={staff.status}"
+        )
+
+    def perform_update(self, serializer):
+        staff = serializer.save()
+        logger.info(
+            f"StaffViewSet.update: staff={staff.id} ({staff.name}) role={staff.role} "
+            f"shift={staff.shift} salary={staff.salary} status={staff.status}"
+        )
+
+    def perform_destroy(self, instance):
+        logger.info(f"StaffViewSet.destroy: staff={instance.id} ({instance.name})")
+        instance.delete()
 
     @action(detail=False, methods=["get"])
     def stats(self, request):
@@ -274,6 +334,7 @@ class StaffViewSet(viewsets.ModelViewSet):
         year       = int(request.data.get("year",  timezone.localdate().year))
         month      = int(request.data.get("month", timezone.localdate().month))
         month_date = dt.date(year, month, 1)
+        logger.info(f"StaffViewSet.generate_payments: year={year} month={month} -> month_date={month_date}")
         created    = 0
         for staff in StaffMember.objects.filter(status="active", salary__gt=0):
             _, made = StaffPayment.objects.get_or_create(
@@ -282,6 +343,7 @@ class StaffViewSet(viewsets.ModelViewSet):
             )
             if made:
                 created += 1
+        logger.info(f"StaffViewSet.generate_payments: month={month_date} created={created} payment record(s)")
         return Response({"created": created, "month": str(month_date)})
 
     # ── Per-staff calendar ────────────────────────────────────────────────────
@@ -297,6 +359,7 @@ class StaffViewSet(viewsets.ModelViewSet):
         today     = timezone.localdate()
         year      = int(request.query_params.get("year",  today.year))
         month_num = int(request.query_params.get("month", today.month))
+        logger.info(f"StaffViewSet.calendar_view: staff={staff.id} ({staff.name}) year={year} month={month_num}")
 
         days, counts = _build_staff_calendar(staff, year, month_num)
         shift = staff.get_shift_template()
@@ -332,15 +395,23 @@ class StaffViewSet(viewsets.ModelViewSet):
         staff  = self.get_object()
         date_s = request.data.get("date")
         if not date_s:
+            logger.warning(f"StaffViewSet.mark_day: rejected — staff={staff.id} ({staff.name}) missing 'date'")
             return Response({"detail": "date is required."}, status=400)
 
         try:
             date = dt.date.fromisoformat(date_s)
         except ValueError:
+            logger.warning(
+                f"StaffViewSet.mark_day: rejected — staff={staff.id} ({staff.name}) invalid date={date_s!r}"
+            )
             return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=400)
 
         status_val = request.data.get("status", "present")
         notes      = request.data.get("notes", "")
+        logger.info(
+            f"StaffViewSet.mark_day: staff={staff.id} ({staff.name}) date={date} status={status_val} "
+            f"check_in={request.data.get('check_in')} check_out={request.data.get('check_out')}"
+        )
 
         def _parse_time(val):
             """'HH:MM' or 'HH:MM:SS' string -> datetime.time, or None."""
@@ -362,7 +433,7 @@ class StaffViewSet(viewsets.ModelViewSet):
             check_in  = None
             check_out = None
 
-        rec, _ = StaffAttendance.objects.update_or_create(
+        rec, was_created = StaffAttendance.objects.update_or_create(
             staff=staff, date=date,
             defaults={
                 "status":    status_val,
@@ -370,6 +441,11 @@ class StaffViewSet(viewsets.ModelViewSet):
                 "check_out": check_out,
                 "notes":     notes,
             },
+        )
+        logger.info(
+            f"StaffViewSet.mark_day: staff={staff.id} date={date} {'created' if was_created else 'updated'} "
+            f"attendance id={rec.id} -> worked_minutes={rec.worked_minutes} late_minutes={rec.late_minutes} "
+            f"overtime_minutes={rec.overtime_minutes} status={rec.status}"
         )
         return Response(AttendanceSerializer(rec).data)
     
@@ -383,6 +459,7 @@ class StaffViewSet(viewsets.ModelViewSet):
         today     = timezone.localdate()
         year      = int(request.query_params.get("year",  today.year))
         month_num = int(request.query_params.get("month", today.month))
+        logger.info(f"StaffViewSet.salary_summary: year={year} month={month_num}")
 
         results = []
         for staff in StaffMember.objects.filter(status="active").select_related("shift_template"):
@@ -402,6 +479,12 @@ class StaffViewSet(viewsets.ModelViewSet):
             billable_mins  = max(0, total_worked_mins)
             hours_pct      = round(billable_mins / total_scheduled_mins * 100, 1) if total_scheduled_mins > 0 else att_pct
             salary_payable = round(base_salary * hours_pct / 100, 2)
+            logger.info(
+                f"StaffViewSet.salary_summary calc: staff={staff.id} ({staff.name}) year={year} month={month_num} "
+                f"base_salary={base_salary} working_days={working_days} days_present={days_present} "
+                f"att_pct={att_pct}% billable_mins={billable_mins} total_scheduled_mins={total_scheduled_mins} "
+                f"hours_pct={hours_pct}% -> salary_payable={salary_payable}"
+            )
 
             month_date = dt.date(year, month_num, 1)
             payment    = StaffPayment.objects.filter(staff=staff, month=month_date).first()
@@ -453,22 +536,47 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     }
     ordering_fields  = ["date"]
 
+    def perform_create(self, serializer):
+        rec = serializer.save()
+        logger.info(
+            f"AttendanceViewSet.create: staff={rec.staff_id} date={rec.date} status={rec.status} "
+            f"check_in={rec.check_in} check_out={rec.check_out}"
+        )
+
+    def perform_update(self, serializer):
+        rec = serializer.save()
+        logger.info(
+            f"AttendanceViewSet.update: attendance id={rec.id} staff={rec.staff_id} date={rec.date} "
+            f"status={rec.status} check_in={rec.check_in} check_out={rec.check_out} "
+            f"worked_minutes={rec.worked_minutes} late_minutes={rec.late_minutes} "
+            f"overtime_minutes={rec.overtime_minutes}"
+        )
+
+    def perform_destroy(self, instance):
+        logger.info(
+            f"AttendanceViewSet.destroy: attendance id={instance.id} staff={instance.staff_id} "
+            f"date={instance.date} status={instance.status}"
+        )
+        instance.delete()
+
     def list(self, request, *args, **kwargs):
         try:
             _auto_mark_absent_staff()
         except Exception:
-            pass
+            logger.exception("AttendanceViewSet.list: _auto_mark_absent_staff() failed")
         return super().list(request, *args, **kwargs)
 
     @action(detail=False, methods=["get"])
     def today(self, request):
         today = timezone.localdate()
         qs    = StaffAttendance.objects.filter(date=today).select_related("staff")
+        logger.info(f"AttendanceViewSet.today: date={today} record_count={qs.count()}")
         return Response(AttendanceSerializer(qs, many=True).data)
 
     @action(detail=False, methods=["post"])
     def bulk_mark(self, request):
         records = request.data.get("records", [])
+        logger.info(f"AttendanceViewSet.bulk_mark: received {len(records)} record(s)")
         created = 0
 
         def _t(val):
@@ -491,11 +599,13 @@ class AttendanceViewSet(viewsets.ModelViewSet):
                 },
             )
             created += 1
+        logger.info(f"AttendanceViewSet.bulk_mark: marked={created} of {len(records)} record(s)")
         return Response({"marked": created})
 
     @action(detail=False, methods=["post"], url_path="auto-absent")
     def auto_absent(self, request):
         """Manually trigger auto-absent logic (also called lazily on calendar fetch)."""
+        logger.info("AttendanceViewSet.auto_absent: manually triggered")
         _auto_mark_absent_staff()
         _auto_mark_absent_members()
         return Response({"detail": "Auto-absent applied."})
@@ -515,11 +625,13 @@ class MemberCalendarView(APIView):
         try:
             member = Member.objects.get(pk=pk)
         except Member.DoesNotExist:
+            logger.warning(f"MemberCalendarView.get: member id={pk} not found")
             return Response({"detail": "Not found."}, status=404)
 
         today     = timezone.localdate()
         year      = int(request.query_params.get("year",  today.year))
         month_num = int(request.query_params.get("month", today.month))
+        logger.info(f"MemberCalendarView.get: member={member.id} ({member.name}) year={year} month={month_num}")
 
         days, counts = _build_member_calendar(member, year, month_num)
         return Response({
@@ -538,49 +650,107 @@ class PaymentViewSet(viewsets.ModelViewSet):
     serializer_class = PaymentSerializer
     filterset_fields = ["staff", "status", "month"]
 
+    def perform_create(self, serializer):
+        p = serializer.save()
+        logger.info(
+            f"PaymentViewSet.create: payment id={p.id} staff={p.staff_id} month={p.month} "
+            f"amount={p.amount} status={p.status}"
+        )
+
+    def perform_update(self, serializer):
+        p = serializer.save()
+        logger.info(
+            f"PaymentViewSet.update: payment id={p.id} staff={p.staff_id} month={p.month} "
+            f"amount={p.amount} status={p.status} paid_date={p.paid_date}"
+        )
+
+    def perform_destroy(self, instance):
+        logger.info(
+            f"PaymentViewSet.destroy: payment id={instance.id} staff={instance.staff_id} "
+            f"month={instance.month} amount={instance.amount} status={instance.status}"
+        )
+        instance.delete()
+
     @action(detail=True, methods=["post"])
     def mark_paid(self, request, pk=None):
         p = self.get_object()
+        logger.info(
+            f"PaymentViewSet.mark_paid: payment id={p.id} staff={p.staff_id} ({p.staff.name}) "
+            f"salary_month={p.month} current_status={p.status} base_amount={p.amount}"
+        )
         if p.status == "paid":
+            logger.warning(f"PaymentViewSet.mark_paid: rejected — payment id={p.id} already paid")
             return Response({"detail": "Already paid."}, status=400)
 
-        # ── Recalculate attendance-based salary ──────────────────────────────
-        days, counts = _build_staff_calendar(p.staff, p.month.year, p.month.month)
+        try:
+            # ── Recalculate attendance-based salary ──────────────────────────────
+            days, counts = _build_staff_calendar(p.staff, p.month.year, p.month.month)
 
-        working_days = counts["working_days"]
-        days_present = (
-            counts.get("present", 0)
-            + counts.get("late", 0)
-            + counts.get("overtime", 0)
-            + counts.get("late_overtime", 0)
-            + counts.get("half", 0) * 0.5
-        )
-        att_pct              = round(days_present / working_days * 100, 1) if working_days > 0 else 0
-        total_worked_mins    = counts["total_worked_minutes"]
-        total_scheduled_mins = counts["total_scheduled_minutes"]
-        total_late_mins      = counts["total_late_minutes"]
-        billable_mins        = max(0, total_worked_mins)
-        hours_pct            = round(billable_mins / total_scheduled_mins * 100, 1) if total_scheduled_mins > 0 else att_pct
-        salary_payable       = round(float(p.staff.salary) * hours_pct / 100, 2)
+            working_days = counts["working_days"]
+            days_present = (
+                counts.get("present", 0)
+                + counts.get("late", 0)
+                + counts.get("overtime", 0)
+                + counts.get("late_overtime", 0)
+                + counts.get("half", 0) * 0.5
+            )
+            att_pct              = round(days_present / working_days * 100, 1) if working_days > 0 else 0
+            total_worked_mins    = counts["total_worked_minutes"]
+            total_scheduled_mins = counts["total_scheduled_minutes"]
+            total_late_mins      = counts["total_late_minutes"]
+            billable_mins        = max(0, total_worked_mins)
+            hours_pct            = round(billable_mins / total_scheduled_mins * 100, 1) if total_scheduled_mins > 0 else att_pct
+            salary_payable       = round(float(p.staff.salary) * hours_pct / 100, 2)
+            logger.info(
+                f"PaymentViewSet.mark_paid calc: payment id={p.id} staff={p.staff_id} salary_month={p.month} "
+                f"base_salary={p.staff.salary} working_days={working_days} days_present={days_present} "
+                f"att_pct={att_pct}% billable_mins={billable_mins} total_scheduled_mins={total_scheduled_mins} "
+                f"total_late_mins={total_late_mins} hours_pct={hours_pct}% -> salary_payable={salary_payable}"
+            )
 
-        # Stamp the attendance-based amount onto the payment record
-        p.amount    = salary_payable
-        p.status    = "paid"
-        p.paid_date = timezone.localdate()
-        p.save()
-        # ────────────────────────────────────────────────────────────────────
+            # Stamp the attendance-based amount onto the payment record
+            p.amount    = salary_payable
+            p.status    = "paid"
+            p.paid_date = timezone.localdate()
+            p.save()
+            logger.info(
+                f"PaymentViewSet.mark_paid: payment id={p.id} staff={p.staff_id} salary_month={p.month} "
+                f"paid_date={p.paid_date} amount={p.amount} -> finance will attribute this to "
+                f"{p.paid_date.month}/{p.paid_date.year} (payment month is {p.month.month}/{p.month.year})"
+            )
+            # ────────────────────────────────────────────────────────────────────
 
-        _record_expense(p.staff, p.amount, p.month, p.paid_date)
+            _record_expense(p.staff, p.amount, p.month, p.paid_date)
+        except Exception:
+            logger.exception(
+                f"PaymentViewSet.mark_paid: failed for payment id={p.id} staff={p.staff_id} month={p.month}"
+            )
+            raise
         return Response(PaymentSerializer(p).data)
 
     @action(detail=True, methods=["post"])
     def mark_unpaid(self, request, pk=None):
         p = self.get_object()
+        logger.info(
+            f"PaymentViewSet.mark_unpaid: payment id={p.id} staff={p.staff_id} ({p.staff.name}) "
+            f"salary_month={p.month} current_status={p.status} amount={p.amount} paid_date={p.paid_date}"
+        )
         if p.status != "paid":
+            logger.warning(f"PaymentViewSet.mark_unpaid: rejected — payment id={p.id} not marked as paid")
             return Response({"detail": "Not marked as paid."}, status=400)
-        _delete_expense(p.staff, p.month)
-        p.status    = "pending"
-        p.paid_date = None
-        p.amount    = p.staff.salary  # reset to base so salary_summary recalculates fresh
-        p.save()
+        try:
+            _delete_expense(p.staff, p.month)
+            p.status    = "pending"
+            p.paid_date = None
+            p.amount    = p.staff.salary  # reset to base so salary_summary recalculates fresh
+            p.save()
+            logger.info(
+                f"PaymentViewSet.mark_unpaid: payment id={p.id} staff={p.staff_id} salary_month={p.month} "
+                f"reset amount to base_salary={p.amount}"
+            )
+        except Exception:
+            logger.exception(
+                f"PaymentViewSet.mark_unpaid: failed for payment id={p.id} staff={p.staff_id} month={p.month}"
+            )
+            raise
         return Response(PaymentSerializer(p).data)
