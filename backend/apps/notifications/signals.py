@@ -56,8 +56,15 @@ def notify_members_on_new_plan(sender, instance, created, **kwargs):
 
     def _bulk_send():
         from django.db import connection
+        from apps.notifications.utils import bulk_slots_remaining
         connection.close()
         for name, raw_phone in recipients:
+            if bulk_slots_remaining() <= 0:
+                logger.warning(
+                    "new_plan bulk send stopped — BULK_DAILY_CAP reached for today."
+                )
+                break
+
             phone = str(raw_phone or "").strip().replace(" ", "").replace("-", "")
             if not phone:
                 continue

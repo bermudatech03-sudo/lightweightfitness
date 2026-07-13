@@ -205,12 +205,17 @@ def send_diet_notifications():
 def send_weekly_pending_payment_reminders():
     """
     Runs every Sunday at 10:00 AM.
-    - Sends each active/paused member with a balance due a reminder to pay.
+    - Sends active/paused members with a balance due a reminder to pay.
+    - Stops early if BULK_DAILY_CAP is reached (see utils.py to change the limit).
     - Rate-limited to 1 message per 2 seconds (30/min) to stay within Meta's safe limits.
-    - Sends admin a summary list of all pending-balance members.
+    - Sends admin a summary of all pending-balance members regardless of cap.
     """
     import time
-    from apps.notifications.utils import send_pending_payment_reminder, send_pending_payment_admin_summary
+    from apps.notifications.utils import (
+        send_pending_payment_reminder,
+        send_pending_payment_admin_summary,
+        bulk_slots_remaining,
+    )
     from apps.members.models import Member
 
     members_with_balance = [
@@ -219,23 +224,48 @@ def send_weekly_pending_payment_reminders():
     ]
 
     for member in members_with_balance:
+        if bulk_slots_remaining() <= 0:
+            logger.warning(
+                "Pending payment reminders stopped — BULK_DAILY_CAP reached for today."
+            )
+            break
         send_pending_payment_reminder(member)
         time.sleep(2)  # 1 message per 2 seconds = 30 per minute
 
+    # Admin summary always sends — it is a single message, not subject to the bulk cap.
     if members_with_balance:
         send_pending_payment_admin_summary(members_with_balance)
 
 
 def retry_failed_notifications():
     import time
+    from datetime import timedelta
     from apps.notifications.models import Notification
     from apps.notifications.whatsapp import send_whatsapp_message, send_whatsapp_template
 
+    # Templates that must never be retried:
+    # - Time-sensitive: message is meaningless after the moment has passed.
+    # - Bill templates: originally sent with a PDF document header that cannot
+    #   be reconstructed here; Meta would reject the call without it.
+    _NO_RETRY_TEMPLATES = {
+        "absent_reminder",    # tied to a specific date — stale after a few hours
+        "diet_reminder",      # tied to a specific meal time — stale immediately
+        "membership_bill",    # requires PDF document header
+        "pt_bill",            # requires PDF document header
+    }
+
     MAX_RETRIES = 3
-    BATCH_SIZE  = 50   # send max 50 retries per run to avoid overloading Meta API
+    BATCH_SIZE  = 50
+    cutoff      = timezone.now() - timedelta(hours=24)  # only retry last 24 hrs
+
     failed = Notification.objects.filter(
-        status="failed", retry_count__lt=MAX_RETRIES
+        status="failed",
+        retry_count__lt=MAX_RETRIES,
+        created_at__gte=cutoff,
+    ).exclude(
+        template_name__in=_NO_RETRY_TEMPLATES,
     )[:BATCH_SIZE]
+
     for notif in failed:
         if not notif.recipient_phone:
             continue

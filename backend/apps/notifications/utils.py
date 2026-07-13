@@ -6,6 +6,29 @@ from .models import Notification
 
 logger = logging.getLogger(__name__)
 
+# ── Bulk-send daily cap ────────────────────────────────────────────────────────
+# Meta Tier 1 (post Business Verification): ~2,000 unique recipients / 24 hrs.
+# Capped at 1,500 to leave headroom for transactional messages.
+# Developer increases this value as the Meta account tier is upgraded.
+#   Tier 1  → 1_500   (current)
+#   Tier 2  → 8_000
+#   Tier 3  → 80_000
+BULK_DAILY_CAP = 1_500
+
+_BULK_TEMPLATE_NAMES = frozenset({"new_plan_launch", "pending_payment_reminder"})
+
+
+def bulk_slots_remaining() -> int:
+    """Return how many more bulk messages can be sent today under BULK_DAILY_CAP."""
+    from django.utils import timezone
+    sent_today = Notification.objects.filter(
+        created_at__date=timezone.localdate(),
+        template_name__in=_BULK_TEMPLATE_NAMES,
+        status__in=("sent", "pending"),
+    ).count()
+    return max(0, BULK_DAILY_CAP - sent_today)
+
+
 # Free-form rendered-text fallback (stored on Notification.message for display/history).
 # The actual delivery goes through Meta-approved WhatsApp templates — see TRIGGER_TEMPLATES.
 TEMPLATES = {
