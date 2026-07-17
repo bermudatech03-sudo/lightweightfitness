@@ -15,7 +15,7 @@ class Enquiry(models.Model):
     email      = models.EmailField(blank=True)
     notes      = models.TextField(blank=True)
     status     = models.CharField(max_length=20, choices=STATUS, default="new", db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

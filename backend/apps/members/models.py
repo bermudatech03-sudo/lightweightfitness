@@ -40,7 +40,7 @@ class Member(models.Model):
     renewal_date = models.DateField(null=True, blank=True, db_index=True)
     status       = models.CharField(max_length=12, choices=STATUS, default="active", db_index=True)
     notes        = models.TextField(blank=True)
-    created_at   = models.DateTimeField(auto_now_add=True)
+    created_at   = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at   = models.DateTimeField(auto_now=True)
     personal_trainer       = models.BooleanField(default=False)
     joining_date           = models.DateField(default=timezone.localdate, null=True, blank=True)
