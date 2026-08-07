@@ -1,4 +1,30 @@
+from django.conf import settings
 from django.db import models
+
+
+class PushSubscription(models.Model):
+    """
+    One row per browser+device that has enabled Chrome/browser push notifications.
+    Admin/staff subscriptions are linked to their account (`user`). Member-linked
+    subscriptions are a Phase 2 addition — `user` stays null for those until the
+    member-facing opt-in flow exists.
+    """
+    user         = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                      related_name="push_subscriptions", null=True, blank=True)
+    endpoint     = models.TextField(unique=True)
+    p256dh       = models.CharField(max_length=255)
+    auth         = models.CharField(max_length=255)
+    user_agent   = models.CharField(max_length=255, blank=True)
+    is_active    = models.BooleanField(default=True, db_index=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        who = self.user.username if self.user_id else "unlinked"
+        return f"PushSubscription({who}, active={self.is_active})"
 
 
 class Notification(models.Model):
@@ -14,6 +40,8 @@ class Notification(models.Model):
         ("enquiry_followup",       "Enquiry Follow-up"),
         ("absent",                 "Member Absent"),
         ("staff_absent",           "Staff Absent"),
+        ("member_checkin",         "Member Check-in"),
+        ("staff_checkin",          "Staff Check-in"),
         ("new_plan",               "New Plan Announcement"),
         ("diet_reminder",          "Diet Reminder"),
         ("pending_payment_member", "Pending Payment Reminder"),

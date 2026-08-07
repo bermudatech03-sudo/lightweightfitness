@@ -3,6 +3,33 @@ import { useAuth } from "../../hooks/useAuth";
 import api from "../../api/axios";
 import toast from "react-hot-toast";
 import "./Settings.css";
+import {
+  isPushSupported, getPushPermissionState, enableBrowserPush,
+  disableBrowserPush, listMySubscriptions,
+} from "../../push/pushClient";
+
+// Only trigger types actually wired to a working Chrome-push code path (see
+// backend apps/notifications/signals.py + push.py). Enquiry messages are
+// deliberately excluded — those go to people who aren't members yet, so
+// there's no one to ask to enable notifications. onOffKey is the SAME setting
+// key used by the on/off toggles further up (removed from that list below to
+// avoid two controls for one setting) — off/whatsapp/chrome, all in one place.
+const CHANNEL_TRIGGERS = [
+  { onOffKey: "NOTIFY_PENDING_PAYMENT_ADMIN", channelKey: "NOTIFY_CHANNEL_PENDING_PAYMENT_ADMIN", label: "Weekly Pending Payment Summary (Admin)" },
+  { onOffKey: "NOTIFY_DAILY_NOTICE",          channelKey: "NOTIFY_CHANNEL_DAILY_NOTICE",          label: "Daily Buy Reminder (Admin)" },
+  { onOffKey: "NOTIFY_STAFF_ABSENT",          channelKey: "NOTIFY_CHANNEL_STAFF_ABSENT",          label: "Staff Absentees" },
+  { onOffKey: "NOTIFY_ABSENT",                channelKey: "NOTIFY_CHANNEL_ABSENT",                label: "Member Absentees" },
+  { onOffKey: "NOTIFY_DIET_REMINDER",         channelKey: "NOTIFY_CHANNEL_DIET_REMINDER",         label: "Diet Plan Reminder" },
+];
+
+// Brand-new notification types (never existed before) — fire on every real
+// check-in via fingerprint or manual attendance. Off by default (unlike the
+// toggles above, which default on to preserve pre-existing behavior) since
+// these are new and can be high-frequency; each is off/whatsapp/chrome.
+const CHECKIN_TRIGGERS = [
+  { onOffKey: "NOTIFY_MEMBER_CHECKIN", channelKey: "NOTIFY_CHANNEL_MEMBER_CHECKIN", label: "Member Check-in" },
+  { onOffKey: "NOTIFY_STAFF_CHECKIN",  channelKey: "NOTIFY_CHANNEL_STAFF_CHECKIN",  label: "Staff Check-in" },
+];
 
 const GYM_FIELDS = [
   { key: "GYM_NAME",               label: "Gym Name",                     type: "text" },
@@ -17,20 +44,18 @@ const GYM_FIELDS = [
     hint: "All admin notifications (daily buy reminder, pending payment summary, etc.) are sent to this number" },
 ];
 
+// Note: Member/Staff Absentees, Diet Plan Reminder, Daily Buy Reminder (Admin),
+// and Weekly Pending Payment Summary (Admin) live in CHANNEL_TRIGGERS below
+// instead (off/whatsapp/chrome, one control) — not duplicated here.
 const NOTIFY_TOGGLES = [
   { key: "NOTIFY_ENROLLMENT",      label: "Enrollment",                  desc: "Sent when a new member enrolls" },
   { key: "NOTIFY_RENEWAL_CONFIRM", label: "Renewal & Installment Payments", desc: "Sent on membership renewal or balance payment" },
   { key: "NOTIFY_RENEWAL_REMIND",  label: "About to Expire",             desc: "Sent 3 days before membership expires" },
   { key: "NOTIFY_EXPIRY",          label: "Plan Expired",                desc: "Sent 3 days after membership expires" },
-  { key: "NOTIFY_ABSENT",          label: "Member Absentees",            desc: "Sent when an active member misses the gym" },
-  { key: "NOTIFY_STAFF_ABSENT",    label: "Staff Absentees",             desc: "Sent when a staff member misses their shift" },
-  { key: "NOTIFY_DIET_REMINDER",   label: "Diet Plan Reminder",          desc: "Sent at scheduled meal times to members on a diet plan" },
   { key: "NOTIFY_ENQUIRY_FOLLOWUP", label: "Enquiry Follow-up",          desc: "Sent on scheduled follow-up dates to enquiries" },
   { key: "NOTIFY_NEW_PLAN",        label: "New Membership / Offer Plan", desc: "Sent to all active members and enquiries when a new plan is added" },
   { key: "NOTIFY_PT_RENEWAL",      label: "PT Renewal & PT Balance",     desc: "Sends the PT receipt on personal training renewal or balance payment" },
-  { key: "NOTIFY_DAILY_NOTICE",             label: "Daily Buy Reminder (Admin)",              desc: "Sends admin a daily WhatsApp about pending items to buy" },
   { key: "NOTIFY_PENDING_PAYMENT_MEMBER",  label: "Weekly Pending Payment (Members)",        desc: "Every Sunday 10 AM — reminds members with an outstanding balance to pay" },
-  { key: "NOTIFY_PENDING_PAYMENT_ADMIN",   label: "Weekly Pending Payment Summary (Admin)",  desc: "Every Sunday 10 AM — sends admin the full list of members with pending balance" },
 ];
 
 export default function Settings() {
@@ -39,12 +64,85 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [gymSettings, setGymSettings] = useState({});
   const [gymSaving, setGymSaving] = useState(false);
+  const [pushPermission, setPushPermission] = useState("default");
+  const [pushBusy, setPushBusy] = useState(false);
+  const [mySubs, setMySubs] = useState([]);
 
   useEffect(() => { document.getElementById("page-title").textContent = "Settings"; }, []);
 
   useEffect(() => {
     api.get("/finances/gym-settings/").then(r => setGymSettings(r.data)).catch(() => {});
   }, []);
+
+  const refreshPushState = () => {
+    getPushPermissionState().then(setPushPermission);
+    listMySubscriptions().then(setMySubs).catch(() => {});
+  };
+  useEffect(refreshPushState, []);
+
+  const handleEnablePush = async () => {
+    setPushBusy(true);
+    try {
+      await enableBrowserPush();
+      toast.success("Desktop notifications enabled on this device!");
+      refreshPushState();
+    } catch (err) {
+      toast.error(err.message || "Could not enable notifications.");
+    } finally { setPushBusy(false); }
+  };
+
+  const handleDisablePush = async () => {
+    setPushBusy(true);
+    try {
+      await disableBrowserPush();
+      toast.success("Desktop notifications turned off for this device.");
+      refreshPushState();
+    } catch {
+      toast.error("Could not disable notifications.");
+    } finally { setPushBusy(false); }
+  };
+
+  // state: "off" | "whatsapp" | "chrome" — shared by CHANNEL_TRIGGERS and CHECKIN_TRIGGERS,
+  // both of which are { onOffKey, channelKey, label } shaped.
+  const setTriggerState = async ({ onOffKey, channelKey }, state) => {
+    const patch = state === "off"
+      ? { [onOffKey]: "false" }
+      : { [onOffKey]: "true", [channelKey]: state };
+    const prev = { [onOffKey]: gymSettings[onOffKey], [channelKey]: gymSettings[channelKey] };
+    setGymSettings(p => ({ ...p, ...patch }));
+    try {
+      await api.patch("/finances/gym-settings/", patch);
+    } catch {
+      setGymSettings(p => ({ ...p, ...prev }));
+      toast.error("Failed to save. Please try again.");
+    }
+  };
+
+  const renderTriggerRow = (trigger) => {
+    const isOn = gymSettings[trigger.onOffKey] === "true";
+    const state = !isOn ? "off" : (gymSettings[trigger.channelKey] === "chrome" ? "chrome" : "whatsapp");
+    return (
+      <div key={trigger.onOffKey} style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        background: "var(--surface2)", borderRadius: 10, padding: "12px 16px",
+        border: "1px solid var(--border)",
+      }}>
+        <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text1)" }}>{trigger.label}</div>
+        <div style={{ display: "flex", gap: 4, background: "var(--surface)", borderRadius: 8, padding: 3 }}>
+          {["off", "whatsapp", "chrome"].map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              onClick={() => setTriggerState(trigger, opt)}
+              className={`btn btn-sm ${state === opt ? "btn-primary" : "btn-ghost"}`}
+            >
+              {opt === "off" ? "Off" : opt === "whatsapp" ? "WhatsApp" : "Chrome"}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const saveGymSettings = async (e) => {
     e.preventDefault();
@@ -178,6 +276,71 @@ export default function Settings() {
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        {/* Chrome Push Notifications */}
+        <div className="card" style={{ padding: 24, gridColumn: "1/-1" }}>
+          <div style={{ fontFamily: "var(--font-display)", fontSize: 16, fontWeight: 700, marginBottom: 4 }}>
+            Chrome Push Notifications
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 18 }}>
+            A free alternative to WhatsApp for the categories below — no Meta messaging cost.
+            Enable it on this device, then choose which categories should use it instead of WhatsApp.
+          </div>
+
+          {!isPushSupported() ? (
+            <div style={{ fontSize: 13, color: "var(--text3)" }}>
+              This browser doesn't support push notifications.
+            </div>
+          ) : (
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              flexWrap: "wrap", gap: 12, marginBottom: 20,
+              background: "var(--surface2)", borderRadius: 10, padding: "12px 16px",
+              border: "1px solid var(--border)",
+            }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text1)", marginBottom: 2 }}>
+                  This device
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text3)" }}>
+                  {mySubs.length > 0
+                    ? `Enabled — ${mySubs.length} device${mySubs.length !== 1 ? "s" : ""} subscribed on this account`
+                    : pushPermission === "denied"
+                      ? "Blocked — notification permission was denied in the browser"
+                      : "Not enabled on this device yet"}
+                </div>
+              </div>
+              {mySubs.length > 0 ? (
+                <button type="button" className="btn btn-ghost" disabled={pushBusy} onClick={handleDisablePush}>
+                  {pushBusy ? "Working…" : "Disable on this device"}
+                </button>
+              ) : (
+                <button
+                  type="button" className="btn btn-primary" disabled={pushBusy || pushPermission === "denied"}
+                  onClick={handleEnablePush}
+                >
+                  {pushBusy ? "Working…" : "Enable Desktop Notifications"}
+                </button>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 12 }}>
+            {CHANNEL_TRIGGERS.map(renderTriggerRow)}
+          </div>
+
+          <div style={{ height: 1, background: "var(--border)", margin: "20px 0" }} />
+
+          <div style={{ fontFamily: "var(--font-display)", fontSize: 14, fontWeight: 700, marginBottom: 4 }}>
+            Check-in Alerts
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 14 }}>
+            New — fires on every real check-in (fingerprint or manual attendance). Off by default.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 12 }}>
+            {CHECKIN_TRIGGERS.map(renderTriggerRow)}
           </div>
         </div>
 

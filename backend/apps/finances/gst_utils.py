@@ -23,6 +23,21 @@ def is_notify_enabled(setting_key):
     return get_setting(setting_key, "true").lower() not in ("false", "0", "no")
 
 
+def get_notify_channel(trigger_type):
+    """
+    Returns "whatsapp" or "chrome" for a given Notification.trigger_type, read from
+    GymSetting key NOTIFY_CHANNEL_<TRIGGER_TYPE> (e.g. trigger_type="absent" reads
+    NOTIFY_CHANNEL_ABSENT). Defaults to "whatsapp" when unset or unrecognized, so
+    nothing changes for any trigger type until this is explicitly configured.
+    """
+    key   = f"NOTIFY_CHANNEL_{trigger_type.upper()}"
+    value = get_setting(key, "whatsapp").strip().lower()
+    if value not in ("whatsapp", "chrome"):
+        logger.warning(f"get_notify_channel: unrecognized value {value!r} for {key}, defaulting to whatsapp")
+        return "whatsapp"
+    return value
+
+
 def get_gst_rate():
     rate = Decimal(get_setting("GST_RATE", "18"))
     logger.info(f"get_gst_rate: GST_RATE={rate}%")

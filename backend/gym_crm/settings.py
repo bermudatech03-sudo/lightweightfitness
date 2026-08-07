@@ -8,6 +8,11 @@ SECRET_KEY = config('SECRET_KEY', default='dev-secret-key')
 DEBUG = config('DEBUG', default=True, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
+# Web Push (Chrome/browser notifications) — see apps/notifications/push.py
+VAPID_PRIVATE_KEY = config('VAPID_PRIVATE_KEY', default='')
+VAPID_PUBLIC_KEY  = config('VAPID_PUBLIC_KEY', default='')
+VAPID_ADMIN_EMAIL = config('VAPID_ADMIN_EMAIL', default='admin@example.com')
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',

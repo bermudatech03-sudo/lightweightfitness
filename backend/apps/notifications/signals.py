@@ -110,6 +110,60 @@ def notify_members_on_new_plan(sender, instance, created, **kwargs):
     _get_executor().submit(_bulk_send)
 
 
+@receiver(post_save, sender="members.MemberAttendance")
+def notify_on_member_checkin(sender, instance, created, **kwargs):
+    """
+    Fires once per real check-in — created=True guards against firing again on
+    the check-out update (same row, get_or_create'd earlier that day), and
+    `instance.check_in` guards against rows created with no check-in at all
+    (e.g. auto-marked-absent). Off by default (NOTIFY_MEMBER_CHECKIN) since this
+    is a brand-new, high-frequency notification type — nothing sends until it's
+    explicitly turned on in Settings, unlike the pre-existing triggers which
+    default on to preserve their prior behavior.
+    """
+    if not created or not instance.check_in:
+        return
+    from apps.finances.gst_utils import get_setting, get_admin_whatsapp_number
+    if get_setting("NOTIFY_MEMBER_CHECKIN", "false").lower() not in ("true", "1"):
+        return
+    member = instance.member
+    Notification.objects.create(
+        recipient_name=member.name,
+        recipient_phone=get_admin_whatsapp_number(),
+        channel="whatsapp",
+        trigger_type="member_checkin",
+        message=f"{member.name} checked in at {instance.check_in.strftime('%I:%M %p')}",
+        status="pending",
+    )
+    logger.info(
+        f"notify_on_member_checkin: notification queued for member={member.id} "
+        f"({member.name}) check_in={instance.check_in}"
+    )
+
+
+@receiver(post_save, sender="staff.StaffAttendance")
+def notify_on_staff_checkin(sender, instance, created, **kwargs):
+    """Same pattern as notify_on_member_checkin — see that docstring."""
+    if not created or not instance.check_in:
+        return
+    from apps.finances.gst_utils import get_setting, get_admin_whatsapp_number
+    if get_setting("NOTIFY_STAFF_CHECKIN", "false").lower() not in ("true", "1"):
+        return
+    staff = instance.staff
+    Notification.objects.create(
+        recipient_name=staff.name,
+        recipient_phone=get_admin_whatsapp_number(),
+        channel="whatsapp",
+        trigger_type="staff_checkin",
+        message=f"{staff.name} checked in at {instance.check_in.strftime('%I:%M %p')}",
+        status="pending",
+    )
+    logger.info(
+        f"notify_on_staff_checkin: notification queued for staff={staff.id} "
+        f"({staff.name}) check_in={instance.check_in}"
+    )
+
+
 # Bill templates — require a PDF document header; handled directly by send_bill_on_whatsapp().
 _BILL_TEMPLATES = {"membership_bill", "pt_bill"}
 
@@ -124,6 +178,11 @@ def dispatch_whatsapp_on_create(sender, instance, created, **kwargs):
     Triggers on every new Notification row (status=pending).
     Uses queryset.update() to avoid re-triggering the signal on status update.
     Bill templates and bulk templates are skipped here — they manage their own dispatch.
+
+    Channel routing: GymSetting NOTIFY_CHANNEL_<TRIGGER_TYPE> decides WhatsApp
+    (default, unchanged code path below) vs Chrome push (see push.py). This is a
+    genuine alternative, not a backup — a failed chrome send does NOT fall back
+    to WhatsApp, it just fails and is logged.
     """
     if not created:
         return
@@ -134,6 +193,33 @@ def dispatch_whatsapp_on_create(sender, instance, created, **kwargs):
     if instance.template_name in _BULK_TEMPLATES:
         # Rate-limited dispatch is handled by the bulk sender (_bulk_send above).
         return
+
+    from apps.finances.gst_utils import get_notify_channel
+    channel = get_notify_channel(instance.trigger_type)
+
+    if channel == "chrome":
+        pk    = instance.pk
+        title = instance.get_trigger_type_display()
+        body  = instance.message
+
+        def _send_chrome():
+            from django.db import connection
+            from .push import send_browser_push_to_all_active
+            connection.close()
+            sent, failed = send_browser_push_to_all_active(title, body)
+            if sent > 0:
+                Notification.objects.filter(pk=pk).update(status="sent", sent_at=timezone.now())
+                logger.info(f"Notification {pk} delivered via chrome push ({sent} sent, {failed} failed)")
+            else:
+                Notification.objects.filter(pk=pk).update(
+                    status="failed",
+                    error_log=f"Chrome push delivery failed ({failed} attempt(s) failed, 0 delivered). No WhatsApp fallback by design.",
+                )
+                logger.warning(f"Notification {pk} chrome push delivery failed — 0 delivered, {failed} failed")
+
+        _get_executor().submit(_send_chrome)
+        return
+
     if not instance.recipient_phone:
         logger.warning(f"Notification {instance.pk} skipped — no phone number.")
         Notification.objects.filter(pk=instance.pk).update(
