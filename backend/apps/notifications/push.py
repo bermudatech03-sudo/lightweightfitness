@@ -55,12 +55,18 @@ def send_browser_push(subscription, title, body, url=None):
 
 def send_browser_push_to_all_active(title, body, url=None):
     """
-    Broadcasts to every currently-active PushSubscription (Phase 1: this is
-    admin/staff devices, plus the kiosk once it's subscribed — there's no
-    per-member targeting yet, see PushSubscription.user).
+    Broadcasts to every currently-active PushSubscription belonging to a
+    superuser. is_superuser (Django's own permission flag) is used rather than
+    the app's custom User.role field — role is purely cosmetic today (nothing
+    else in the app gates on it, and there's currently no way to create an
+    account with role="admin" through the app itself), so it can't be trusted
+    to reflect who's actually an admin. is_superuser is the real signal and
+    needs no manual upkeep as accounts are created. Member-linked subscriptions
+    (user=null, Phase 2, not built yet) are excluded too, since the filter
+    requires a matching User.
     Returns (sent_count, failed_count).
     """
-    subscriptions = list(PushSubscription.objects.filter(is_active=True))
+    subscriptions = list(PushSubscription.objects.filter(is_active=True, user__is_superuser=True))
     sent = failed = 0
     for sub in subscriptions:
         result = send_browser_push(sub, title, body, url)
