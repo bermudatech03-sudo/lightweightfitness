@@ -206,17 +206,23 @@ def dispatch_whatsapp_on_create(sender, instance, created, **kwargs):
             from django.db import connection
             from .push import send_browser_push_to_all_active
             connection.close()
-            sent, failed = send_browser_push_to_all_active(title, body)
+            sent, failed, skip_reason = send_browser_push_to_all_active(title, body, instance.trigger_type)
             if sent > 0:
                 Notification.objects.filter(pk=pk).update(channel="chrome", status="sent", sent_at=timezone.now())
                 logger.info(f"Notification {pk} delivered via chrome push ({sent} sent, {failed} failed)")
             else:
+                error_msg = skip_reason or (
+                    f"Chrome push delivery failed ({failed} attempt(s) failed, 0 delivered). No WhatsApp fallback by design."
+                )
                 Notification.objects.filter(pk=pk).update(
                     channel="chrome",
                     status="failed",
-                    error_log=f"Chrome push delivery failed ({failed} attempt(s) failed, 0 delivered). No WhatsApp fallback by design.",
+                    error_log=error_msg,
                 )
-                logger.warning(f"Notification {pk} chrome push delivery failed — 0 delivered, {failed} failed")
+                logger.warning(
+                    f"Notification {pk} chrome push not delivered — 0 sent, {failed} failed"
+                    + (f" (skipped: {skip_reason})" if skip_reason else "")
+                )
 
         _get_executor().submit(_send_chrome)
         return

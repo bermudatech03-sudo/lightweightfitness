@@ -81,19 +81,48 @@ def send_browser_push(subscription, title, body, url=None):
         return {"success": False, "error": str(e)}
 
 
-def send_browser_push_to_all_active(title, body, url=None):
+# Trigger types that belong to a specific MEMBER, not to admin. Chrome push
+# has no way to reach an individual member yet (Phase 2 — member-linked
+# PushSubscriptions — isn't built), so broadcasting these to admin would
+# silently redirect them to the wrong person rather than just changing their
+# channel. Until Phase 2 exists, these are excluded from the admin broadcast
+# entirely. Once Phase 2 exists, this same list becomes the allowlist for
+# routing to the correct member instead — same data, meaning flips.
+_MEMBER_ONLY_TRIGGERS = {"absent", "diet_reminder"}
+
+_MEMBER_ONLY_SKIP_REASON = (
+    "Member-only trigger — admin is not the intended recipient, and there's no "
+    "member subscription to reach until Phase 2 is built."
+)
+
+
+def send_browser_push_to_all_active(title, body, trigger_type, url=None):
     """
     Broadcasts to every currently-active PushSubscription belonging to a
-    superuser. is_superuser (Django's own permission flag) is used rather than
-    the app's custom User.role field — role is purely cosmetic today (nothing
-    else in the app gates on it, and there's currently no way to create an
-    account with role="admin" through the app itself), so it can't be trusted
-    to reflect who's actually an admin. is_superuser is the real signal and
-    needs no manual upkeep as accounts are created. Member-linked subscriptions
+    superuser — unless trigger_type is member-only (see _MEMBER_ONLY_TRIGGERS
+    above), in which case nothing is sent at all.
+
+    is_superuser (Django's own permission flag) is used rather than the app's
+    custom User.role field — role is purely cosmetic today (nothing else in
+    the app gates on it, and there's currently no way to create an account
+    with role="admin" through the app itself), so it can't be trusted to
+    reflect who's actually an admin. is_superuser is the real signal and needs
+    no manual upkeep as accounts are created. Member-linked subscriptions
     (user=null, Phase 2, not built yet) are excluded too, since the filter
     requires a matching User.
-    Returns (sent_count, failed_count).
+
+    Returns (sent_count, failed_count, skip_reason). skip_reason is None
+    unless the send was skipped entirely for the member-only-trigger reason —
+    callers should use it as the error_log message instead of a generic
+    "delivery failed", since nothing was actually attempted.
     """
+    if trigger_type in _MEMBER_ONLY_TRIGGERS:
+        logger.info(
+            f"send_browser_push_to_all_active: trigger_type={trigger_type!r} is member-only, "
+            f"skipping admin broadcast entirely"
+        )
+        return 0, 0, _MEMBER_ONLY_SKIP_REASON
+
     subscriptions = list(PushSubscription.objects.filter(is_active=True, user__is_superuser=True))
     sent = failed = 0
     for sub in subscriptions:
@@ -106,4 +135,4 @@ def send_browser_push_to_all_active(title, body, url=None):
         f"send_browser_push_to_all_active: title={title!r} -> "
         f"{sent} sent, {failed} failed, {len(subscriptions)} active subscription(s) targeted"
     )
-    return sent, failed
+    return sent, failed, None
