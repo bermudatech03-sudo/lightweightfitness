@@ -198,15 +198,21 @@ def dispatch_whatsapp_on_create(sender, instance, created, **kwargs):
     channel = get_notify_channel(instance.trigger_type)
 
     if channel == "chrome":
-        pk    = instance.pk
-        title = instance.get_trigger_type_display()
-        body  = instance.message
+        pk          = instance.pk
+        title       = instance.get_trigger_type_display()
+        body        = instance.message
+        trigger     = instance.trigger_type
+        member      = instance.member
 
         def _send_chrome():
             from django.db import connection
-            from .push import send_browser_push_to_all_active
+            from .push import send_browser_push_to_all_active, send_browser_push_to_member, MEMBER_ONLY_TRIGGERS
             connection.close()
-            sent, failed, skip_reason = send_browser_push_to_all_active(title, body, instance.trigger_type)
+            if trigger in MEMBER_ONLY_TRIGGERS:
+                sent, failed, skip_reason = send_browser_push_to_member(member, title, body)
+            else:
+                sent, failed = send_browser_push_to_all_active(title, body)
+                skip_reason = None
             if sent > 0:
                 Notification.objects.filter(pk=pk).update(channel="chrome", status="sent", sent_at=timezone.now())
                 logger.info(f"Notification {pk} delivered via chrome push ({sent} sent, {failed} failed)")

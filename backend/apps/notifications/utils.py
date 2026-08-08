@@ -118,6 +118,7 @@ def send_notification(member, trigger_type: str):
         Notification.objects.create(
             recipient_name=member.name,
             recipient_phone=phone,
+            member=member,
             channel="whatsapp",
             trigger_type=trigger_type,
             message=body,

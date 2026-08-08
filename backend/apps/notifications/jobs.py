@@ -211,6 +211,7 @@ def send_diet_notifications():
                 Notification.objects.create(
                     recipient_name=member.name,
                     recipient_phone=phone,
+                    member=member,
                     channel="whatsapp",
                     trigger_type="diet_reminder",
                     message=message,

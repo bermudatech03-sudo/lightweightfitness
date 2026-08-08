@@ -1,0 +1,71 @@
+.optin-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg, #08080a);
+  padding: 24px;
+}
+
+.optin-card {
+  max-width: 380px;
+  width: 100%;
+  text-align: center;
+  background: var(--surface, #121214);
+  border: 1px solid var(--border, #232326);
+  border-radius: 16px;
+  padding: 32px 24px;
+}
+
+.optin-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  margin-bottom: 16px;
+}
+
+.optin-card h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text1, #fff);
+  margin-bottom: 12px;
+}
+
+.optin-muted {
+  font-size: 14px;
+  color: var(--text3, #888);
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.optin-error {
+  font-size: 14px;
+  color: #ff5b5b;
+  margin-bottom: 20px;
+}
+
+.optin-btn {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent, #a8ff57);
+  color: #08080a;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.optin-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.optin-qr {
+  width: 100%;
+  max-width: 260px;
+  border-radius: 12px;
+  background: #fff;
+  padding: 8px;
+}

@@ -99,8 +99,12 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
 
 class VapidPublicKeyView(APIView):
-    """Public VAPID key the frontend needs to call pushManager.subscribe(). Not secret."""
-    permission_classes = [permissions.IsAuthenticated]
+    """
+    Public VAPID key the frontend needs to call pushManager.subscribe(). Not
+    secret — that's what "public key" means — so this is intentionally open
+    (AllowAny), since the unauthenticated member opt-in page needs it too.
+    """
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request):
         return Response({"publicKey": settings.VAPID_PUBLIC_KEY})
@@ -161,3 +165,72 @@ class MyPushSubscriptionsView(APIView):
     def get(self, request):
         subs = PushSubscription.objects.filter(user=request.user, is_active=True)
         return Response(PushSubscriptionSerializer(subs, many=True).data)
+
+
+class MemberPushLinkView(APIView):
+    """
+    Phase 2: admin scans the QR the member's opt-in page generated (raw
+    endpoint/keys/user_agent — the member's browser never talks to this
+    backend directly) and links it to that member's profile here. Requires
+    an authenticated staff/admin session — the member never calls this.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, member_id):
+        from apps.members.models import Member
+        try:
+            member = Member.objects.get(pk=member_id)
+        except Member.DoesNotExist:
+            return Response({"detail": "Member not found."}, status=404)
+
+        data     = request.data
+        endpoint = data.get("endpoint")
+        keys     = data.get("keys") or {}
+        p256dh   = keys.get("p256dh")
+        auth     = keys.get("auth")
+        if not (endpoint and p256dh and auth):
+            logger.warning(f"MemberPushLinkView: rejected — missing endpoint/keys (member_id={member_id})")
+            return Response({"detail": "endpoint and keys.p256dh/keys.auth are required."}, status=400)
+
+        sub, created = PushSubscription.objects.update_or_create(
+            endpoint=endpoint,
+            defaults={
+                "member":     member,
+                "user":       None,
+                "p256dh":     p256dh,
+                "auth":       auth,
+                "user_agent": data.get("user_agent", "")[:255],
+                "is_active":  True,
+            },
+        )
+        logger.info(
+            f"MemberPushLinkView: {'created' if created else 're-linked'} subscription "
+            f"id={sub.pk} for member={member.id} ({member.name}), linked by {request.user.username}"
+        )
+        return Response({"id": sub.id, "created": created}, status=201 if created else 200)
+
+
+class MemberPushSubscriptionsView(APIView):
+    """Lists a specific member's active subscriptions — powers the 'linked devices' list on their profile."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, member_id):
+        subs = PushSubscription.objects.filter(member_id=member_id, is_active=True)
+        return Response(PushSubscriptionSerializer(subs, many=True).data)
+
+
+class RevokePushSubscriptionView(APIView):
+    """
+    Admin-side revoke by subscription id (as opposed to PushUnsubscribeView,
+    which is the self-service endpoint-based one for a user's own browser).
+    Works for either a user- or member-linked subscription.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, subscription_id):
+        updated = PushSubscription.objects.filter(pk=subscription_id).update(is_active=False)
+        logger.info(
+            f"RevokePushSubscriptionView: deactivated subscription id={subscription_id} "
+            f"(updated={updated}, by {request.user.username})"
+        )
+        return Response({"deactivated": updated})

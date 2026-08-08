@@ -81,48 +81,30 @@ def send_browser_push(subscription, title, body, url=None):
         return {"success": False, "error": str(e)}
 
 
-# Trigger types that belong to a specific MEMBER, not to admin. Chrome push
-# has no way to reach an individual member yet (Phase 2 — member-linked
-# PushSubscriptions — isn't built), so broadcasting these to admin would
-# silently redirect them to the wrong person rather than just changing their
-# channel. Until Phase 2 exists, these are excluded from the admin broadcast
-# entirely. Once Phase 2 exists, this same list becomes the allowlist for
-# routing to the correct member instead — same data, meaning flips.
-_MEMBER_ONLY_TRIGGERS = {"absent", "diet_reminder"}
-
-_MEMBER_ONLY_SKIP_REASON = (
-    "Member-only trigger — admin is not the intended recipient, and there's no "
-    "member subscription to reach until Phase 2 is built."
-)
+# Trigger types that belong to a specific MEMBER, not to admin. signals.py
+# checks this to decide which send function to call: send_browser_push_to_member
+# (this list) vs send_browser_push_to_all_active (everything else — admin's
+# own broadcast). A member-facing trigger here that has no PushSubscription
+# yet (member hasn't scanned the admin's QR) simply fails with a clear reason
+# — there's still no WhatsApp fallback, by the same design as everywhere else.
+MEMBER_ONLY_TRIGGERS = {"absent", "diet_reminder"}
 
 
-def send_browser_push_to_all_active(title, body, trigger_type, url=None):
+def send_browser_push_to_all_active(title, body, url=None):
     """
     Broadcasts to every currently-active PushSubscription belonging to a
-    superuser — unless trigger_type is member-only (see _MEMBER_ONLY_TRIGGERS
-    above), in which case nothing is sent at all.
+    superuser. Callers must not use this for MEMBER_ONLY_TRIGGERS — see
+    send_browser_push_to_member for those.
 
     is_superuser (Django's own permission flag) is used rather than the app's
     custom User.role field — role is purely cosmetic today (nothing else in
     the app gates on it, and there's currently no way to create an account
     with role="admin" through the app itself), so it can't be trusted to
     reflect who's actually an admin. is_superuser is the real signal and needs
-    no manual upkeep as accounts are created. Member-linked subscriptions
-    (user=null, Phase 2, not built yet) are excluded too, since the filter
-    requires a matching User.
+    no manual upkeep as accounts are created.
 
-    Returns (sent_count, failed_count, skip_reason). skip_reason is None
-    unless the send was skipped entirely for the member-only-trigger reason —
-    callers should use it as the error_log message instead of a generic
-    "delivery failed", since nothing was actually attempted.
+    Returns (sent_count, failed_count).
     """
-    if trigger_type in _MEMBER_ONLY_TRIGGERS:
-        logger.info(
-            f"send_browser_push_to_all_active: trigger_type={trigger_type!r} is member-only, "
-            f"skipping admin broadcast entirely"
-        )
-        return 0, 0, _MEMBER_ONLY_SKIP_REASON
-
     subscriptions = list(PushSubscription.objects.filter(is_active=True, user__is_superuser=True))
     sent = failed = 0
     for sub in subscriptions:
@@ -134,5 +116,39 @@ def send_browser_push_to_all_active(title, body, trigger_type, url=None):
     logger.info(
         f"send_browser_push_to_all_active: title={title!r} -> "
         f"{sent} sent, {failed} failed, {len(subscriptions)} active subscription(s) targeted"
+    )
+    return sent, failed
+
+
+def send_browser_push_to_member(member, title, body, url=None):
+    """
+    Sends to a specific member's active PushSubscription(s) — the Phase 2
+    admin-mediated QR link flow (member's browser generates the subscription,
+    admin scans it and links it to that member's profile). A member can, in
+    principle, have more than one linked device, same as admin/staff.
+
+    Returns (sent_count, failed_count, skip_reason). skip_reason is set (and
+    sent/failed both 0) when nothing was actually attempted — either no member
+    was linked to the notification at all, or the member has no active
+    subscription yet (hasn't gone through the QR opt-in with the admin).
+    """
+    if member is None:
+        return 0, 0, "No member linked to this notification — cannot route it to a specific person."
+
+    subscriptions = list(PushSubscription.objects.filter(is_active=True, member=member))
+    if not subscriptions:
+        logger.info(f"send_browser_push_to_member: member={member.id} ({member.name}) has no active subscription")
+        return 0, 0, f"{member.name} hasn't linked a device for Chrome notifications yet."
+
+    sent = failed = 0
+    for sub in subscriptions:
+        result = send_browser_push(sub, title, body, url)
+        if result["success"]:
+            sent += 1
+        else:
+            failed += 1
+    logger.info(
+        f"send_browser_push_to_member: member={member.id} ({member.name}) title={title!r} -> "
+        f"{sent} sent, {failed} failed, {len(subscriptions)} subscription(s) targeted"
     )
     return sent, failed, None
