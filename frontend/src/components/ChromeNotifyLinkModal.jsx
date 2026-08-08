@@ -15,6 +15,8 @@ export default function ChromeNotifyLinkModal({ member, onClose }) {
   const [linking, setLinking] = useState(false);
   const [devices, setDevices] = useState([]);
   const [loadingDevices, setLoadingDevices] = useState(true);
+  const [showPaste, setShowPaste] = useState(false);
+  const [pasteText, setPasteText] = useState("");
 
   const loadDevices = () => {
     setLoadingDevices(true);
@@ -50,7 +52,15 @@ export default function ChromeNotifyLinkModal({ member, onClose }) {
 
     html5QrCode.start(
       { facingMode: "environment" },
-      { fps: 10, qrbox: 250 },
+      {
+        fps: 10,
+        qrbox: 250,
+        // Best-effort: asks the browser to keep re-focusing the video stream (a
+        // getUserMedia feed doesn't autofocus as aggressively up-close as a native
+        // camera app by default). Unsupported on some devices/browsers, in which
+        // case it's silently ignored rather than failing the camera start.
+        videoConstraints: { facingMode: "environment", advanced: [{ focusMode: "continuous" }] },
+      },
       (decodedText) => {
         if (handled) return;
         handled = true;
@@ -121,6 +131,37 @@ export default function ChromeNotifyLinkModal({ member, onClose }) {
               {linking ? "Linking…" : "Cancel Scan"}
             </button>
           </>
+        )}
+
+        {/* Fallback for devices where the in-app camera won't decode the QR:
+            read it with any other camera/QR app instead, then paste the text
+            here — same linkSubscription() call either way. */}
+        {!showPaste ? (
+          <button
+            className="btn btn-ghost" style={{ width: "100%", marginTop: 10, fontSize: 12 }}
+            onClick={() => setShowPaste(true)}
+          >
+            Can't scan? Paste the code instead
+          </button>
+        ) : (
+          <div style={{ marginTop: 10 }}>
+            <textarea
+              className="form-input" rows={3} style={{ width: "100%", fontSize: 12, fontFamily: "monospace" }}
+              placeholder="Paste the text decoded from the member's QR here…"
+              value={pasteText} onChange={e => setPasteText(e.target.value)}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button
+                className="btn btn-primary" style={{ flex: 1 }} disabled={linking || !pasteText.trim()}
+                onClick={() => linkSubscription(pasteText.trim()).then(() => setPasteText(""))}
+              >
+                {linking ? "Linking…" : "Link"}
+              </button>
+              <button className="btn btn-ghost" onClick={() => { setShowPaste(false); setPasteText(""); }}>
+                Cancel
+              </button>
+            </div>
+          </div>
         )}
 
         <button className="btn btn-secondary" style={{ width: "100%", marginTop: 14 }} onClick={onClose}>

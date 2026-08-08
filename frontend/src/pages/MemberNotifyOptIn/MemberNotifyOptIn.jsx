@@ -46,12 +46,24 @@ export default function MemberNotifyOptIn() {
         });
       }
 
+      // A short device label instead of the full user-agent string (which alone can
+      // run 100+ chars) — keeps the QR's data (and so its module density) down,
+      // since the admin's in-app camera scanner has a harder time locking focus on
+      // a dense code than a native camera app does.
+      const ua = navigator.userAgent;
+      const os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : "Unknown OS";
+      const browserMatch = ua.match(/(Chrome|Firefox|Safari|Edg|SamsungBrowser)\/[\d.]+/);
+      const uaShort = [os, browserMatch ? browserMatch[0].replace("Edg/", "Edge/") : ""].filter(Boolean).join(" · ");
+
       const payload = {
         ...subscription.toJSON(),
-        user_agent: navigator.userAgent,
+        user_agent: uaShort,
       };
 
-      const qr = await QRCode.toDataURL(JSON.stringify(payload), { width: 320, margin: 2 });
+      // errorCorrectionLevel "L" (vs the default "M") trades resilience to a
+      // damaged/dirty code — irrelevant for one shown fresh on a screen — for a
+      // coarser, larger-moduled QR that's easier for a phone camera to decode.
+      const qr = await QRCode.toDataURL(JSON.stringify(payload), { width: 320, margin: 2, errorCorrectionLevel: "L" });
       setQrDataUrl(qr);
       setStatus("ready");
     } catch (err) {
