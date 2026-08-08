@@ -208,10 +208,11 @@ def dispatch_whatsapp_on_create(sender, instance, created, **kwargs):
             connection.close()
             sent, failed = send_browser_push_to_all_active(title, body)
             if sent > 0:
-                Notification.objects.filter(pk=pk).update(status="sent", sent_at=timezone.now())
+                Notification.objects.filter(pk=pk).update(channel="chrome", status="sent", sent_at=timezone.now())
                 logger.info(f"Notification {pk} delivered via chrome push ({sent} sent, {failed} failed)")
             else:
                 Notification.objects.filter(pk=pk).update(
+                    channel="chrome",
                     status="failed",
                     error_log=f"Chrome push delivery failed ({failed} attempt(s) failed, 0 delivered). No WhatsApp fallback by design.",
                 )

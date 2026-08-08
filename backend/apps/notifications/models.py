@@ -28,7 +28,7 @@ class PushSubscription(models.Model):
 
 
 class Notification(models.Model):
-    CHANNEL = [("whatsapp", "WhatsApp")]
+    CHANNEL = [("whatsapp", "WhatsApp"), ("chrome", "Chrome Push")]
     STATUS  = [("sent", "Sent"), ("failed", "Failed"), ("pending", "Pending")]
     TRIGGER = [
         ("renewal_remind",         "Renewal Reminder"),

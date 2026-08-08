@@ -1,5 +1,7 @@
 import json
 import logging
+import threading
+import time
 
 from django.conf import settings
 from django.utils import timezone
@@ -9,6 +11,26 @@ from .models import PushSubscription
 
 logger = logging.getLogger(__name__)
 
+# Cross-thread rate gate: at most one push send every _MIN_PUSH_INTERVAL_SECONDS,
+# no matter which background thread (or how many concurrent notification events)
+# triggered it. Without this, several Notification rows created within
+# milliseconds of each other (e.g. a scheduler misfire re-running a job) each
+# spawn their own background send, firing a burst of near-identical pushes —
+# exactly the pattern Chrome's spam/abuse detection silently suppresses.
+_push_rate_lock = threading.Lock()
+_last_push_sent_at = 0.0
+_MIN_PUSH_INTERVAL_SECONDS = 2.0
+
+
+def _throttle_push():
+    global _last_push_sent_at
+    with _push_rate_lock:
+        wait = _MIN_PUSH_INTERVAL_SECONDS - (time.monotonic() - _last_push_sent_at)
+        if wait > 0:
+            logger.info(f"_throttle_push: waiting {wait:.2f}s to keep pushes >= {_MIN_PUSH_INTERVAL_SECONDS}s apart")
+            time.sleep(wait)
+        _last_push_sent_at = time.monotonic()
+
 
 def send_browser_push(subscription, title, body, url=None):
     """
@@ -17,11 +39,17 @@ def send_browser_push(subscription, title, body, url=None):
     Returns {"success": True} or {"success": False, "error": "..."} — same shape
     as whatsapp.py's send functions, so callers can handle both channels uniformly.
 
+    Rate-limited to one send every _MIN_PUSH_INTERVAL_SECONDS across the whole
+    process (see _throttle_push) — this is the actual serialization point, so it
+    applies whether one event fans out to several subscriptions or several
+    events fire in a burst from different threads.
+
     No retry / no fallback to another channel on failure — the caller (signals.py)
     just logs and moves on. A 404/410 response means the browser's subscription is
     gone (expired, revoked, browser data cleared); that's marked inactive here so
     it stops being tried, rather than failing the same way forever.
     """
+    _throttle_push()
     payload = json.dumps({"title": title, "body": body, "url": url or "/"})
     try:
         webpush(
