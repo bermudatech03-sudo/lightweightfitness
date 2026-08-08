@@ -18,12 +18,20 @@ const MEMBER_OPTIN_PATH = "/nx7qk2vwmz9pfhrb3jt/";
 // there's no one to ask to enable notifications. onOffKey is the SAME setting
 // key used by the on/off toggles further up (removed from that list below to
 // avoid two controls for one setting) — off/whatsapp/chrome, all in one place.
+// Chrome here means two different things depending on the trigger — admin-facing
+// ones (Weekly Pending Payment, Daily Buy Reminder, Staff Absentees) broadcast to
+// admin; member-facing ones (Member Absentees, Diet Plan Reminder, About to
+// Expire, Plan Expired) route to that SPECIFIC member's linked device instead
+// (see MEMBER_ONLY_TRIGGERS in backend/apps/notifications/push.py) — the UI
+// control is identical either way, only the backend routing differs.
 const CHANNEL_TRIGGERS = [
   { onOffKey: "NOTIFY_PENDING_PAYMENT_ADMIN", channelKey: "NOTIFY_CHANNEL_PENDING_PAYMENT_ADMIN", label: "Weekly Pending Payment Summary (Admin)" },
   { onOffKey: "NOTIFY_DAILY_NOTICE",          channelKey: "NOTIFY_CHANNEL_DAILY_NOTICE",          label: "Daily Buy Reminder (Admin)" },
   { onOffKey: "NOTIFY_STAFF_ABSENT",          channelKey: "NOTIFY_CHANNEL_STAFF_ABSENT",          label: "Staff Absentees" },
   { onOffKey: "NOTIFY_ABSENT",                channelKey: "NOTIFY_CHANNEL_ABSENT",                label: "Member Absentees" },
   { onOffKey: "NOTIFY_DIET_REMINDER",         channelKey: "NOTIFY_CHANNEL_DIET_REMINDER",         label: "Diet Plan Reminder" },
+  { onOffKey: "NOTIFY_RENEWAL_REMIND",        channelKey: "NOTIFY_CHANNEL_RENEWAL_REMIND",        label: "About to Expire" },
+  { onOffKey: "NOTIFY_EXPIRY",                channelKey: "NOTIFY_CHANNEL_EXPIRY",                label: "Plan Expired" },
 ];
 
 // Brand-new notification types (never existed before) — fire on every real

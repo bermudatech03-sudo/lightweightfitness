@@ -87,7 +87,7 @@ def send_browser_push(subscription, title, body, url=None):
 # own broadcast). A member-facing trigger here that has no PushSubscription
 # yet (member hasn't scanned the admin's QR) simply fails with a clear reason
 # — there's still no WhatsApp fallback, by the same design as everywhere else.
-MEMBER_ONLY_TRIGGERS = {"absent", "diet_reminder"}
+MEMBER_ONLY_TRIGGERS = {"absent", "diet_reminder", "renewal_remind", "expiry"}
 
 
 def send_browser_push_to_all_active(title, body, url=None):
