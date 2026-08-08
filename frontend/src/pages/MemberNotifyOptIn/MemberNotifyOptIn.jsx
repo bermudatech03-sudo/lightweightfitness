@@ -63,7 +63,7 @@ export default function MemberNotifyOptIn() {
       // errorCorrectionLevel "L" (vs the default "M") trades resilience to a
       // damaged/dirty code — irrelevant for one shown fresh on a screen — for a
       // coarser, larger-moduled QR that's easier for a phone camera to decode.
-      const qr = await QRCode.toDataURL(JSON.stringify(payload), { width: 320, margin: 2, errorCorrectionLevel: "L" });
+      const qr = await QRCode.toDataURL(JSON.stringify(payload), { width: 400, margin: 2, errorCorrectionLevel: "L" });
       setQrDataUrl(qr);
       setStatus("ready");
     } catch (err) {

@@ -8,7 +8,7 @@
 }
 
 .optin-card {
-  max-width: 380px;
+  max-width: 420px;
   width: 100%;
   text-align: center;
   background: var(--surface, #121214);
@@ -64,8 +64,12 @@
 
 .optin-qr {
   width: 100%;
-  max-width: 260px;
+  max-width: 340px;
   border-radius: 12px;
   background: #fff;
-  padding: 8px;
+  padding: 12px;
+  /* Keep module edges crisp instead of blurred by the browser's default
+     smoothing when scaling the canvas-rendered PNG down to display size —
+     a soft edge is exactly what a camera-based decoder struggles with. */
+  image-rendering: pixelated;
 }

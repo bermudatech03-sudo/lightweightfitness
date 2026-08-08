@@ -63,38 +63,60 @@ export default function NotifyPermissions() {
           </div>
         </div>
       ) : (
-        <div className="table-wrapper desktop-table-view">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Member</th>
-                <th>Device</th>
-                <th>Linked</th>
-                <th>Last Used</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(s => (
-                <tr key={s.id}>
-                  <td style={{ fontWeight: 600 }}>{s.member_name}</td>
-                  <td style={{ fontSize: 12, color: "var(--text-muted)", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {s.user_agent || "Unknown device"}
-                  </td>
-                  <td style={{ fontSize: 12, whiteSpace: "nowrap" }}>
-                    {new Date(s.created_at).toLocaleDateString("en-IN")}
-                  </td>
-                  <td style={{ fontSize: 12, whiteSpace: "nowrap", color: "var(--text-muted)" }}>
-                    {s.last_used_at ? new Date(s.last_used_at).toLocaleDateString("en-IN") : "—"}
-                  </td>
-                  <td>
-                    <button className="btn btn-sm btn-danger" onClick={() => revoke(s.id)}>Revoke</button>
-                  </td>
+        <>
+          {/* ── Mobile cards (≤640px) ── */}
+          <div className="mobile-card-list">
+            {filtered.map(s => (
+              <div key={s.id} className="mobile-card">
+                <div className="mobile-card__left">
+                  <span className="mobile-card__title">{s.member_name}</span>
+                  <span className="mobile-card__meta">{s.user_agent || "Unknown device"}</span>
+                  <span className="mobile-card__meta">
+                    Linked {new Date(s.created_at).toLocaleDateString("en-IN")}
+                    {s.last_used_at ? ` · Last used ${new Date(s.last_used_at).toLocaleDateString("en-IN")}` : ""}
+                  </span>
+                </div>
+                <div className="mobile-card__right">
+                  <button className="btn btn-sm btn-danger" onClick={() => revoke(s.id)}>Revoke</button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Desktop table (>640px) ── */}
+          <div className="table-wrapper desktop-table-view">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Member</th>
+                  <th>Device</th>
+                  <th>Linked</th>
+                  <th>Last Used</th>
+                  <th>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {filtered.map(s => (
+                  <tr key={s.id}>
+                    <td style={{ fontWeight: 600 }}>{s.member_name}</td>
+                    <td style={{ fontSize: 12, color: "var(--text-muted)", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {s.user_agent || "Unknown device"}
+                    </td>
+                    <td style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                      {new Date(s.created_at).toLocaleDateString("en-IN")}
+                    </td>
+                    <td style={{ fontSize: 12, whiteSpace: "nowrap", color: "var(--text-muted)" }}>
+                      {s.last_used_at ? new Date(s.last_used_at).toLocaleDateString("en-IN") : "—"}
+                    </td>
+                    <td>
+                      <button className="btn btn-sm btn-danger" onClick={() => revoke(s.id)}>Revoke</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   );

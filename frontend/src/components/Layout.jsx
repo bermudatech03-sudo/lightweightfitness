@@ -39,7 +39,7 @@ const NAV = [
   { to:"/finances",      icon:"◎",  label:"Finances" },
   { to:"/enquiries",     icon:"◑",  label:"Enquiries" },
   { to:"/notifications", icon:"⚇",  label:"Notifications" },
-  { to:"/notify-permissions", icon:"🔔", label:"Notify Permissions" },
+  { to:"/notify-permissions", icon:"⚿",  label:"Notify Permissions" },
   { to:"/settings",      icon:"⚙",  label:"Settings" },
 ];
 
