@@ -16,6 +16,7 @@ import Diets from "./pages/Diet/DietPage";
 import TrainerAssignments from "./pages/TrainerAssignments/TrainerAssignments";
 import Enquiry from "./pages/Enquiry/Enquiry";
 import MemberNotifyOptIn from "./pages/MemberNotifyOptIn/MemberNotifyOptIn";
+import NotifyPermissions from "./pages/NotifyPermissions/NotifyPermissions";
 function Protected({ children }) {
   const { user } = useAuth();
   return user ? children : <Navigate to="/login" replace />;
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="trainer-assignments" element={<TrainerAssignments />} />
             <Route path="attendance" element={<Attendance />} />
             <Route path="notifications" element={<Notifications />} />
+            <Route path="notify-permissions" element={<NotifyPermissions />} />
             <Route path="enquiries" element={<Enquiry />} />
             <Route path="settings" element={<Settings />} />
           </Route>

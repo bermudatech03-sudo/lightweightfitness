@@ -219,6 +219,34 @@ class MemberPushSubscriptionsView(APIView):
         return Response(PushSubscriptionSerializer(subs, many=True).data)
 
 
+class AllMemberPushSubscriptionsView(APIView):
+    """
+    Lists every active member-linked subscription across the whole gym — the
+    global oversight screen (Settings) so admin isn't limited to checking one
+    member's profile at a time to see who has notifications enabled.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        subs = (
+            PushSubscription.objects
+            .filter(member__isnull=False, is_active=True)
+            .select_related("member")
+            .order_by("-created_at")
+        )
+        return Response([
+            {
+                "id":            s.id,
+                "member_id":     s.member_id,
+                "member_name":   s.member.name,
+                "user_agent":    s.user_agent,
+                "created_at":    s.created_at,
+                "last_used_at":  s.last_used_at,
+            }
+            for s in subs
+        ])
+
+
 class RevokePushSubscriptionView(APIView):
     """
     Admin-side revoke by subscription id (as opposed to PushUnsubscribeView,

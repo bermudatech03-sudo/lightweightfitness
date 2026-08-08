@@ -2,11 +2,15 @@ import { useState, useEffect } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import api from "../../api/axios";
 import toast from "react-hot-toast";
+import QRCode from "qrcode";
 import "./Settings.css";
 import {
   isPushSupported, getPushPermissionState, enableBrowserPush,
   disableBrowserPush, listMySubscriptions,
 } from "../../push/pushClient";
+
+// Same obscure path registered in App.jsx for MemberNotifyOptIn.
+const MEMBER_OPTIN_PATH = "/nx7qk2vwmz9pfhrb3jt/";
 
 // Only trigger types actually wired to a working Chrome-push code path (see
 // backend apps/notifications/signals.py + push.py). Enquiry messages are
@@ -67,11 +71,18 @@ export default function Settings() {
   const [pushPermission, setPushPermission] = useState("default");
   const [pushBusy, setPushBusy] = useState(false);
   const [mySubs, setMySubs] = useState([]);
+  const [optinQr, setOptinQr] = useState(null);
+  const [showOptinQr, setShowOptinQr] = useState(false);
 
   useEffect(() => { document.getElementById("page-title").textContent = "Settings"; }, []);
 
   useEffect(() => {
     api.get("/finances/gym-settings/").then(r => setGymSettings(r.data)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const url = `${window.location.origin}${MEMBER_OPTIN_PATH}`;
+    QRCode.toDataURL(url, { width: 260, margin: 2 }).then(setOptinQr).catch(() => {});
   }, []);
 
   const refreshPushState = () => {
@@ -326,6 +337,31 @@ export default function Settings() {
               )}
             </div>
           )}
+
+          <div style={{
+            background: "var(--surface2)", borderRadius: 10, padding: "12px 16px",
+            border: "1px solid var(--border)", marginBottom: 20,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text1)", marginBottom: 2 }}>
+                  Get a member enabled
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text3)" }}>
+                  Show this QR — the member scans it, taps Allow, then shows you the QR their
+                  page generates so you can link it (via a member's "Chrome Notifications" button).
+                </div>
+              </div>
+              <button type="button" className="btn btn-ghost" onClick={() => setShowOptinQr(v => !v)}>
+                {showOptinQr ? "Hide QR" : "Show QR"}
+              </button>
+            </div>
+            {showOptinQr && optinQr && (
+              <div style={{ marginTop: 14, textAlign: "center" }}>
+                <img src={optinQr} alt="Member notification opt-in QR" style={{ width: 200, borderRadius: 8, background: "#fff", padding: 6 }} />
+              </div>
+            )}
+          </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 12 }}>
             {CHANNEL_TRIGGERS.map(renderTriggerRow)}
