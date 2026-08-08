@@ -15,7 +15,10 @@ export default function NotifyPermissions() {
     setLoading(true);
     api.get("/notifications/push/members/subscriptions/")
       .then(r => setSubs(r.data))
-      .catch(() => toast.error("Failed to load permissions."))
+      .catch(err => {
+        console.error("NotifyPermissions: load failed", err?.response?.status, err?.response?.data || err);
+        toast.error("Failed to load permissions.");
+      })
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
@@ -25,7 +28,8 @@ export default function NotifyPermissions() {
       await api.post(`/notifications/push/subscriptions/${subId}/revoke/`);
       toast.success("Permission revoked.");
       load();
-    } catch {
+    } catch (err) {
+      console.error("NotifyPermissions: revoke failed", err?.response?.status, err?.response?.data || err);
       toast.error("Failed to revoke.");
     }
   };

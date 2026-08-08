@@ -35,7 +35,8 @@ export default function ChromeNotifyLinkModal({ member, onClose }) {
       await api.post(`/notifications/push/member/${member.id}/link/`, payload);
       toast.success("Device linked!");
       loadDevices();
-    } catch {
+    } catch (err) {
+      console.error("ChromeNotifyLinkModal: link failed", err?.response?.status, err?.response?.data || err);
       toast.error("Invalid QR code, or linking failed. Try again.");
     } finally {
       setLinking(false);
@@ -69,6 +70,7 @@ export default function ChromeNotifyLinkModal({ member, onClose }) {
       },
       () => { /* per-frame miss — expected constantly while aiming the camera */ }
     ).catch((err) => {
+      console.error("ChromeNotifyLinkModal: camera start failed", err);
       toast.error("Could not access camera: " + (err?.message || err));
       setScanning(false);
     });
@@ -83,7 +85,8 @@ export default function ChromeNotifyLinkModal({ member, onClose }) {
       await api.post(`/notifications/push/subscriptions/${subId}/revoke/`);
       toast.success("Device removed.");
       loadDevices();
-    } catch {
+    } catch (err) {
+      console.error("ChromeNotifyLinkModal: revoke failed", err?.response?.status, err?.response?.data || err);
       toast.error("Failed to remove device.");
     }
   };

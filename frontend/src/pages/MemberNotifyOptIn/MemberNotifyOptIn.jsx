@@ -67,6 +67,7 @@ export default function MemberNotifyOptIn() {
       setQrDataUrl(qr);
       setStatus("ready");
     } catch (err) {
+      console.error("MemberNotifyOptIn: enable failed", err);
       setErrorMsg(err.message || "Something went wrong enabling notifications.");
       setStatus("error");
     }

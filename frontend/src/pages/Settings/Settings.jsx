@@ -142,6 +142,7 @@ export default function Settings() {
     return (
       <div key={trigger.onOffKey} style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
+        flexWrap: "wrap", gap: 10,
         background: "var(--surface2)", borderRadius: 10, padding: "12px 16px",
         border: "1px solid var(--border)",
       }}>
@@ -217,7 +218,7 @@ export default function Settings() {
             Gym Settings
           </div>
           <form onSubmit={saveGymSettings}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 14, marginBottom: 18 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(260px,100%),1fr))", gap: 14, marginBottom: 18 }}>
               {GYM_FIELDS.map(({ key, label, type, hint }) => (
                 <div className="form-group" key={key}>
                   <label className="form-label">{label}</label>
@@ -247,7 +248,7 @@ export default function Settings() {
           <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 18 }}>
             Turn each category on or off. Each toggle saves instantly.
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(300px,100%),1fr))", gap: 12 }}>
             {NOTIFY_TOGGLES.map(({ key, label, desc }) => {
               const isOn = (gymSettings[key] ?? "true") !== "false";
               const toggle = async () => {
@@ -370,7 +371,7 @@ export default function Settings() {
             )}
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(320px,100%),1fr))", gap: 12 }}>
             {CHANNEL_TRIGGERS.map(renderTriggerRow)}
           </div>
 
@@ -382,7 +383,7 @@ export default function Settings() {
           <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 14 }}>
             New — fires on every real check-in (fingerprint or manual attendance). Off by default.
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(320px,100%),1fr))", gap: 12 }}>
             {CHECKIN_TRIGGERS.map(renderTriggerRow)}
           </div>
         </div>
@@ -415,7 +416,7 @@ export default function Settings() {
   </div>
 
   {/* Features Grid */}
-  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 14 }}>
+  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(200px,100%),1fr))", gap: 14 }}>
     {[
       { label: "⚡ Fast & Scalable", value: "Built with Django + React" },
       { label: "🔐 Secure Access", value: "JWT Authentication" },
@@ -467,7 +468,7 @@ export default function Settings() {
       Bermuda Tech
     </div>
 
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(200px,100%),1fr))", gap: 12 }}>
       {[
         { label: "Company Name", value: "Bermuda Tech" },
        
