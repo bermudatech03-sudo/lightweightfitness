@@ -230,6 +230,7 @@ def send_pending_payment_reminder(member):
             recipient_phone = _normalize_phone(member.phone),
             channel         = "whatsapp",
             trigger_type    = "pending_payment_member",
+            member          = member,
             message         = body,
             template_name   = TRIGGER_TEMPLATES["pending_payment_member"],
             template_params = [member.name, balance],

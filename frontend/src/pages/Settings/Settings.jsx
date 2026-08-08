@@ -32,6 +32,7 @@ const CHANNEL_TRIGGERS = [
   { onOffKey: "NOTIFY_DIET_REMINDER",         channelKey: "NOTIFY_CHANNEL_DIET_REMINDER",         label: "Diet Plan Reminder" },
   { onOffKey: "NOTIFY_RENEWAL_REMIND",        channelKey: "NOTIFY_CHANNEL_RENEWAL_REMIND",        label: "About to Expire" },
   { onOffKey: "NOTIFY_EXPIRY",                channelKey: "NOTIFY_CHANNEL_EXPIRY",                label: "Plan Expired" },
+  { onOffKey: "NOTIFY_PENDING_PAYMENT_MEMBER", channelKey: "NOTIFY_CHANNEL_PENDING_PAYMENT_MEMBER", label: "Weekly Pending Payment (Members)" },
 ];
 
 // Brand-new notification types (never existed before) — fire on every real
@@ -57,17 +58,15 @@ const GYM_FIELDS = [
 ];
 
 // Note: Member/Staff Absentees, Diet Plan Reminder, Daily Buy Reminder (Admin),
-// and Weekly Pending Payment Summary (Admin) live in CHANNEL_TRIGGERS below
-// instead (off/whatsapp/chrome, one control) — not duplicated here.
+// Weekly Pending Payment Summary (Admin), About to Expire, Plan Expired, and
+// Weekly Pending Payment (Members) live in CHANNEL_TRIGGERS below instead
+// (off/whatsapp/chrome, one control) — not duplicated here.
 const NOTIFY_TOGGLES = [
   { key: "NOTIFY_ENROLLMENT",      label: "Enrollment",                  desc: "Sent when a new member enrolls" },
   { key: "NOTIFY_RENEWAL_CONFIRM", label: "Renewal & Installment Payments", desc: "Sent on membership renewal or balance payment" },
-  { key: "NOTIFY_RENEWAL_REMIND",  label: "About to Expire",             desc: "Sent 3 days before membership expires" },
-  { key: "NOTIFY_EXPIRY",          label: "Plan Expired",                desc: "Sent 3 days after membership expires" },
   { key: "NOTIFY_ENQUIRY_FOLLOWUP", label: "Enquiry Follow-up",          desc: "Sent on scheduled follow-up dates to enquiries" },
   { key: "NOTIFY_NEW_PLAN",        label: "New Membership / Offer Plan", desc: "Sent to all active members and enquiries when a new plan is added" },
   { key: "NOTIFY_PT_RENEWAL",      label: "PT Renewal & PT Balance",     desc: "Sends the PT receipt on personal training renewal or balance payment" },
-  { key: "NOTIFY_PENDING_PAYMENT_MEMBER",  label: "Weekly Pending Payment (Members)",        desc: "Every Sunday 10 AM — reminds members with an outstanding balance to pay" },
 ];
 
 export default function Settings() {
